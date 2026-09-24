@@ -1,0 +1,22 @@
+{
+  "name": "eqbuddy-telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "EQBuddy Evolved opt-in heartbeat backend: Cloudflare Worker + D1.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "^4.0.0",
+    "@types/node": "^26.6.2",
+    "typescript": "^5.6.0",
+    "vitest": "~4.1.0",
+    "wrangler": "4.137.0"
+  }
+}
