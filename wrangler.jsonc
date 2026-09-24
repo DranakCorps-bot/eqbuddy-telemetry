@@ -22,8 +22,8 @@
       "binding": "DB",
       "database_name": "eqbuddy-telemetry",
       // Not a secret: a D1 id is useless without the account's API token.
-      // Replaced with the real id at first deploy (see README "Deploying").
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // Created at first deploy, 2026-09-24 (DRA-369; see README "Deploying").
+      "database_id": "891fa79f-7a60-4bb3-ba3e-c9357b790bfa",
       "migrations_dir": "migrations"
     }
   ]
