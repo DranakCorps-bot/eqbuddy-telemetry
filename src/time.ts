@@ -11,6 +11,7 @@ export const RETENTION_DAYS = 90;
 export const RATE_LIMIT_MS = 60_000;
 
 export const CONCURRENT_WINDOW_MS = 10 * MINUTE_MS;
+export const DAILY_ACTIVE_WINDOW_MS = DAY_MS;
 export const UNIQUE_WINDOW_MS = 30 * DAY_MS;
 export const VERSION_WINDOW_MS = 7 * DAY_MS;
 

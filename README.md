@@ -43,7 +43,8 @@ body is limited to 1 KiB. A refused body is not stored and not logged.
 1. closes each finished 10-minute bucket into `bucket_count` (bucket start and
    how many distinct ids it held, with no ids);
 2. writes a `daily_rollup` row for each completed UTC day that lacks one
-   (30-day uniques and 7-day version mix, as of the end of that day), catching
+   (30-day uniques, 7-day version mix and that day's distinct installs, as of
+   the end of that day), catching
    up any day a missed run skipped;
 3. deletes raw heartbeats whose bucket started more than 90 days ago;
 4. rewrites `metrics.json`.
@@ -53,14 +54,15 @@ loses nothing.
 
 ## What it stores
 
-[`migrations/0001_init.sql`](migrations/0001_init.sql) is the entire storage
-shape. Only `heartbeat` holds an install id:
+[`migrations/`](migrations/) is the entire storage shape: `0001_init.sql`
+creates it and `0002_daily_active.sql` adds one id-free count to
+`daily_rollup`. Only `heartbeat` holds an install id:
 
 | Table | Columns | Kept |
 |---|---|---|
 | `heartbeat` | `install_id`, `bucket_start`, `app_version`, `os`, `last_seen_ms` | 90 days, or until you delete |
 | `bucket_count` | `bucket_start`, `distinct_ids` | Indefinitely (no ids) |
-| `daily_rollup` | `day`, `unique_30d`, `version_mix_7d` | Indefinitely (no ids) |
+| `daily_rollup` | `day`, `unique_30d`, `version_mix_7d`, `active_1d` | Indefinitely (no ids) |
 | `metrics_snapshot` | `id`, `generated_at`, `body` | One row, overwritten |
 
 A heartbeat **upserts** one row per install per 10-minute bucket. The client
@@ -88,7 +90,9 @@ A test pins every column of every table. Adding one fails the build.
       { "appVersion": "2.0.0", "count": 16, "share": 0.167 }
     ]
   },
-  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…" }
+  "dailyActive": 41,
+  "weeklyActive": 96,
+  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…" }
 }
 ```
 
@@ -98,6 +102,8 @@ A test pins every column of every table. Adding one fails the build.
 | `peakConcurrent` | The most distinct ids in any one closed 10-minute bucket, with that bucket's start. The earliest bucket wins a tie | Every 10 minutes |
 | `uniqueUsers30d` | Distinct ids in the 30 days up to the end of the last complete UTC day | Daily |
 | `versionMix7d` | Among distinct ids in the 7 days up to the end of the last complete UTC day, the share on each version, counting each id once on its **latest** version | Daily |
+| `dailyActive` | Distinct ids with a heartbeat in the last complete UTC day (the 24 hours up to its end) | Daily |
+| `weeklyActive` | Distinct ids with a heartbeat in the 7 days up to the end of the last complete UTC day. The same set `versionMix7d` divides, so it always equals `versionMix7d.denominator` | Daily |
 
 The `definitions` block carries those sentences, so a badge or page can print
 the definition it was given rather than write its own. Every id is an
@@ -107,8 +113,10 @@ opt-out an identity reset.
 
 **Why the trailing numbers are daily.** A 30-day distinct count reads every raw
 row from 30 days. Running it on every 10-minute pass would spend the free
-tier's rows-read allowance 144 times a day on a number that barely moves. Until
-the first UTC day completes, both read zero.
+tier's rows-read allowance 144 times a day on a number that barely moves. The
+1- and 7-day counts follow the same rule: a live 7-day scan every pass would
+cost a quarter of that, and a live 24-hour one would still be the largest read
+in the pass. Until the first UTC day completes, all four read zero.
 
 ## Where logging is switched off
 
@@ -151,7 +159,7 @@ is written down here so the rule can be checked.
   Moving to a paid plan costs money, and that is a decision for the project
   owner, not for this code. Workers Free also allows only 50 D1 queries per
   invocation, so after a cron outage the daily rollup catches up at most 7
-  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass stays under 30 queries
+  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass stays under 40 queries
   and the backlog drains over the next passes.
 - **No licence has been chosen yet.** The code is public so it can be read and
   checked. Choosing a licence is the project owner's decision.
@@ -171,7 +179,7 @@ fixtures with known answers:
 - `test/worker/endpoints.test.ts`: payload validation (19 refused shapes, none
   stored), upsert, the rate limit and its boundary, delete across buckets
   that leaves other ids alone, and routing.
-- `test/worker/rollup.test.ts`: bucket closing, all four public numbers, window
+- `test/worker/rollup.test.ts`: bucket closing, all six public numbers, window
   edges to the millisecond, daily catch-up, the 90-day purge boundary,
   aggregates that outlive the purge, the `metrics.json` shape and headers, and
   the storage-shape pin.
