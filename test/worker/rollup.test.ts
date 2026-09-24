@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { handle } from "../../src/index";
 import {
   DEFINITIONS,
+  MAX_ROLLUP_DAYS_PER_PASS,
   closeBuckets,
   computeMetrics,
   purgeExpired,
@@ -111,8 +112,11 @@ describe("rollup math against a fixture with known answers", () => {
     expect(before.uniqueUsers30d).toBe(0);
     expect(before.versionMix7d).toEqual({ denominator: 0, versions: [] });
 
+    // The fixture reaches back 40 days, so the rollup backlog is 41 days and
+    // drains MAX_ROLLUP_DAYS_PER_PASS per pass: six passes, ten minutes apart.
     const nextDay = Date.parse("2026-10-02T00:05:00Z");
-    await runScheduled(env.DB, nextDay);
+    const passes = Math.ceil(41 / MAX_ROLLUP_DAYS_PER_PASS);
+    for (let pass = 0; pass < passes; pass++) await runScheduled(env.DB, nextDay + pass * 10 * MIN);
     const after = await computeMetrics(env.DB, nextDay);
     expect(after.uniqueUsers30d).toBe(4);
     expect(after.versionMix7d.denominator).toBe(3);
@@ -202,6 +206,40 @@ describe("daily rollups", () => {
       "2026-10-05",
       "2026-10-06",
     ]);
+  });
+
+  it("keeps a whole cron pass under the free tier's 50 queries after a long outage, and drains the backlog over later passes", async () => {
+    await beat(A, "2.0.0", DAY1 + 10 * 60 * MIN);
+    await writeDailyRollups(env.DB, DAY1 + DAY + 5 * MIN); // Oct 1 rolled up
+    await beat(B, "2.0.0", DAY1 + 30 * DAY + 60 * MIN); // then the cron is down for 40 days
+
+    // Counts every statement the pass prepares, the way D1 counts queries per invocation.
+    let queries = 0;
+    const counted = new Proxy(env.DB, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop === "prepare") {
+          return (sql: string) => {
+            queries++;
+            return target.prepare(sql);
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const back = DAY1 + 41 * DAY + 5 * MIN; // first pass of Nov 11th: Oct 2..Nov 10 are missing
+    await runScheduled(counted, back);
+    expect(queries).toBeLessThan(50);
+    expect((await daily()).length).toBe(1 + MAX_ROLLUP_DAYS_PER_PASS);
+    // The pass got past the rollup: the snapshot was written.
+    const snap = await env.DB.prepare("SELECT generated_at FROM metrics_snapshot WHERE id = 1").first<{ generated_at: string }>();
+    expect(snap?.generated_at).toBe("2026-11-11T00:05:00Z");
+
+    for (let pass = 1; pass <= 5; pass++) await runScheduled(env.DB, back + pass * 10 * MIN);
+    const days = (await daily()).map((r) => r.day);
+    expect(days.length).toBe(41); // Oct 1 .. Nov 10, no gap
+    expect(days[days.length - 1]).toBe("2026-11-10");
   });
 
   it("writes nothing when there has never been a heartbeat", async () => {

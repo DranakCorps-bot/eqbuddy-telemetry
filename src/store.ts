@@ -158,10 +158,21 @@ export async function peakConcurrent(db: D1Database): Promise<{ count: number; b
 }
 
 /**
+ * At most this many days are rolled up per cron pass. Each day costs three D1
+ * queries, and Workers Free allows 50 queries per invocation (Cloudflare's D1
+ * limits page, read 2026-09-24). Without a cap, catching up after a cron
+ * outage of about two weeks would throw before the purge and the snapshot ran.
+ * Seven days is 21 queries, so a whole pass stays under 30. The rest of the
+ * backlog waits for the next pass, ten minutes later.
+ */
+export const MAX_ROLLUP_DAYS_PER_PASS = 7;
+
+/**
  * Writes a daily_rollup row for every COMPLETED UTC day that lacks one, from
  * the day after the last rollup (or the first raw heartbeat's day) up to
- * yesterday. Figures are as of the end of the day. Catching up rather than
- * firing once at midnight means a missed cron run skips nothing.
+ * yesterday, MAX_ROLLUP_DAYS_PER_PASS at a time. Figures are as of the end of
+ * the day. Catching up rather than firing once at midnight means a missed cron
+ * run skips nothing.
  */
 export async function writeDailyRollups(db: D1Database, nowMs: number): Promise<void> {
   const last = await db.prepare(`SELECT MAX(day) AS day FROM daily_rollup`).first<{ day: string | null }>();
@@ -178,7 +189,8 @@ export async function writeDailyRollups(db: D1Database, nowMs: number): Promise<
   const today = dayStartMs(nowMs);
   // Raw rows only reach back RETENTION_DAYS, so there is nothing to roll up before that.
   dayMs = Math.max(dayMs, today - RETENTION_DAYS * DAY_MS);
-  for (; dayMs < today; dayMs += DAY_MS) {
+  const stop = Math.min(today, dayMs + MAX_ROLLUP_DAYS_PER_PASS * DAY_MS);
+  for (; dayMs < stop; dayMs += DAY_MS) {
     const endOfDay = dayMs + DAY_MS - 1;
     const unique = await uniqueUsers30d(db, endOfDay);
     const mix = await versionMix(db, endOfDay);

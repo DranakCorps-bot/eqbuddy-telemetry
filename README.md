@@ -148,7 +148,10 @@ is written down here so the rule can be checked.
   deleted again at 90 days. **Estimate, not a measurement:** somewhere between
   several hundred and about 1,500 opted-in installs playing a few hours a day.
   Moving to a paid plan costs money, and that is a decision for the project
-  owner, not for this code.
+  owner, not for this code. Workers Free also allows only 50 D1 queries per
+  invocation, so after a cron outage the daily rollup catches up at most 7
+  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass stays under 30 queries
+  and the backlog drains over the next passes.
 - **No licence has been chosen yet.** The code is public so it can be read and
   checked. Choosing a licence is the project owner's decision.
 
