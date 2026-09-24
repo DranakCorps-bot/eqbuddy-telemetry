@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "eqbuddy-telemetry",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  // IPs are never persisted or logged (TEL-004). The code logs nothing; these
+  // three switches keep the PLATFORM from logging requests on our behalf.
+  // test/static/guards.test.ts fails if any of them is turned on.
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false, "invocation_logs": false }
+  },
+  "logpush": false,
+
+  // One cron: close buckets, catch up daily rollups, purge past 90 days,
+  // rewrite metrics.json. Every step is idempotent, so a missed run skips nothing.
+  "triggers": { "crons": ["*/10 * * * *"] },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "eqbuddy-telemetry",
+      // Not a secret: a D1 id is useless without the account's API token.
+      // Replaced with the real id at first deploy (see README "Deploying").
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
