@@ -19,9 +19,10 @@ The requirement this implements is `docs/v2/telemetry.md` in the
 [EQBuddy repository](https://github.com/DranakCorps-bot/EQBuddy) (TEL-001…006).
 That page wins any disagreement with this README.
 
-> **Status: not deployed.** This repository holds the code and its tests.
-> Nothing is running yet, and EQBuddy does not send heartbeats yet. See
-> [Deploying](#deploying).
+> **Status: deployed 2026-09-24** (Cloudflare free tier) at
+> `https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev`. No released
+> EQBuddy build carries that host yet, so no player sends to it yet, and
+> telemetry stays off unless a player turns it on. See [Deploying](#deploying).
 
 ## What it does
 
