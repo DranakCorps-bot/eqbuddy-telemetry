@@ -5,6 +5,7 @@
 import type { Heartbeat } from "./validate";
 import {
   CONCURRENT_WINDOW_MS,
+  DAILY_ACTIVE_WINDOW_MS,
   DAY_MS,
   RATE_LIMIT_MS,
   RETENTION_DAYS,
@@ -139,6 +140,11 @@ export async function versionMix(db: D1Database, asOfMs: number): Promise<Versio
   };
 }
 
+/** Distinct ids seen in the 24 hours up to `asOf`. The rollup asks it at a day's end. */
+export async function dailyActive(db: D1Database, asOfMs: number): Promise<number> {
+  return distinctIdsSeen(db, asOfMs - DAILY_ACTIVE_WINDOW_MS, asOfMs);
+}
+
 export async function uniqueUsers30d(db: D1Database, asOfMs: number): Promise<number> {
   return distinctIdsSeen(db, asOfMs - UNIQUE_WINDOW_MS, asOfMs);
 }
@@ -158,11 +164,11 @@ export async function peakConcurrent(db: D1Database): Promise<{ count: number; b
 }
 
 /**
- * At most this many days are rolled up per cron pass. Each day costs three D1
+ * At most this many days are rolled up per cron pass. Each day costs four D1
  * queries, and Workers Free allows 50 queries per invocation (Cloudflare's D1
  * limits page, read 2026-09-24). Without a cap, catching up after a cron
  * outage of about two weeks would throw before the purge and the snapshot ran.
- * Seven days is 21 queries, so a whole pass stays under 30. The rest of the
+ * Seven days is 28 queries, so a whole pass stays under 40. The rest of the
  * backlog waits for the next pass, ten minutes later.
  */
 export const MAX_ROLLUP_DAYS_PER_PASS = 7;
@@ -194,9 +200,10 @@ export async function writeDailyRollups(db: D1Database, nowMs: number): Promise<
     const endOfDay = dayMs + DAY_MS - 1;
     const unique = await uniqueUsers30d(db, endOfDay);
     const mix = await versionMix(db, endOfDay);
+    const active = await dailyActive(db, endOfDay);
     await db
-      .prepare(`INSERT OR IGNORE INTO daily_rollup (day, unique_30d, version_mix_7d) VALUES (?1, ?2, ?3)`)
-      .bind(dayKey(dayMs), unique, JSON.stringify(mix))
+      .prepare(`INSERT OR IGNORE INTO daily_rollup (day, unique_30d, version_mix_7d, active_1d) VALUES (?1, ?2, ?3, ?4)`)
+      .bind(dayKey(dayMs), unique, JSON.stringify(mix), active)
       .run();
   }
 }
@@ -209,6 +216,10 @@ export const DEFINITIONS = {
     "Distinct opted-in installs in the 30 days up to the end of the last complete UTC day. An install, not a person; telemetry is off unless the player turns it on.",
   versionMix7d:
     "Share of the distinct opted-in installs in the 7 days up to the end of the last complete UTC day on each version (each install counted once, on its latest version).",
+  dailyActive:
+    "Distinct opted-in installs that sent a heartbeat in the last complete UTC day (the 24 hours up to its end).",
+  weeklyActive:
+    "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
 } as const;
 
 export interface Metrics {
@@ -219,23 +230,30 @@ export interface Metrics {
   peakConcurrentBucket: string | null;
   uniqueUsers30d: number;
   versionMix7d: VersionMix;
+  dailyActive: number;
+  weeklyActive: number;
   definitions: typeof DEFINITIONS;
 }
 
 /**
- * The two trailing-window numbers come from the latest DAILY rollup, not a
- * live scan. A 30-day distinct count reads every raw row in 30 days; doing
- * that on every 10-minute pass would spend D1's free rows-read allowance 144
- * times a day for a number that moves slowly. Before the first complete day
- * both are zero, which is the truth about a day that has not ended.
+ * The trailing-window numbers come from the latest DAILY rollup, not a live
+ * scan. A 30-day distinct count reads every raw row in 30 days; doing that on
+ * every 10-minute pass would spend D1's free rows-read allowance 144 times a
+ * day for a number that moves slowly. The 1- and 7-day counts follow the same
+ * rule for the same reason. Before the first complete day all are zero, which
+ * is the truth about a day that has not ended.
+ *
+ * weeklyActive is the 7-day version mix's denominator, not a second query: it
+ * is the same distinct set over the same window, and one producer cannot
+ * disagree with itself.
  */
-async function latestDaily(db: D1Database): Promise<{ unique30d: number; mix: VersionMix }> {
+async function latestDaily(db: D1Database): Promise<{ unique30d: number; active1d: number; mix: VersionMix }> {
   const row = await db
-    .prepare(`SELECT unique_30d, version_mix_7d FROM daily_rollup ORDER BY day DESC LIMIT 1`)
-    .first<{ unique_30d: number; version_mix_7d: string }>();
+    .prepare(`SELECT unique_30d, version_mix_7d, active_1d FROM daily_rollup ORDER BY day DESC LIMIT 1`)
+    .first<{ unique_30d: number; version_mix_7d: string; active_1d: number }>();
   return row
-    ? { unique30d: row.unique_30d, mix: JSON.parse(row.version_mix_7d) as VersionMix }
-    : { unique30d: 0, mix: { denominator: 0, versions: [] } };
+    ? { unique30d: row.unique_30d, active1d: row.active_1d, mix: JSON.parse(row.version_mix_7d) as VersionMix }
+    : { unique30d: 0, active1d: 0, mix: { denominator: 0, versions: [] } };
 }
 
 export async function computeMetrics(db: D1Database, nowMs: number): Promise<Metrics> {
@@ -249,6 +267,8 @@ export async function computeMetrics(db: D1Database, nowMs: number): Promise<Met
     peakConcurrentBucket: peak.bucket,
     uniqueUsers30d: daily.unique30d,
     versionMix7d: daily.mix,
+    dailyActive: daily.active1d,
+    weeklyActive: daily.mix.denominator,
     definitions: DEFINITIONS,
   };
 }

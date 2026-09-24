@@ -6,6 +6,7 @@ import {
   MAX_ROLLUP_DAYS_PER_PASS,
   closeBuckets,
   computeMetrics,
+  dailyActive,
   purgeExpired,
   recordHeartbeat,
   runScheduled,
@@ -87,6 +88,8 @@ describe("rollup math against a fixture with known answers", () => {
     const asOf = T0 + 15 * MIN;
     // A, B, C, D. E is 40 days old.
     expect(await uniqueUsers30d(env.DB, asOf)).toBe(4);
+    // Trailing 24 hours: A, B, C. A beat three times and counts once; D is 20 days old.
+    expect(await dailyActive(env.DB, asOf)).toBe(3);
     // Trailing 7 days: A, B, C. B counts ONCE, on its latest version.
     expect(await versionMix(env.DB, asOf)).toEqual({
       denominator: 3,
@@ -105,12 +108,22 @@ describe("rollup math against a fixture with known answers", () => {
     expect(await uniqueUsers30d(env.DB, asOf)).toBe(1);
   });
 
+  it("the 24-hour edge is exact too", async () => {
+    const asOf = T0 + 15 * MIN;
+    await beat(A, "2.0.0", asOf - DAY); // exactly 24 hours: outside
+    await beat(B, "2.0.0", asOf - DAY + 1); // one ms inside
+    await beat(C, "2.0.0", asOf + 1); // after asOf: not yet seen
+    expect(await dailyActive(env.DB, asOf)).toBe(1);
+  });
+
   it("publishes the trailing-window numbers from the latest daily rollup", async () => {
     await seedFixture();
     // Before any day has completed, the trailing numbers are zero rather than a live scan.
     const before = await computeMetrics(env.DB, T0 + 15 * MIN);
     expect(before.uniqueUsers30d).toBe(0);
     expect(before.versionMix7d).toEqual({ denominator: 0, versions: [] });
+    expect(before.dailyActive).toBe(0);
+    expect(before.weeklyActive).toBe(0);
 
     // The fixture reaches back 40 days, so the rollup backlog is 41 days and
     // drains MAX_ROLLUP_DAYS_PER_PASS per pass: six passes, ten minutes apart.
@@ -120,6 +133,11 @@ describe("rollup math against a fixture with known answers", () => {
     const after = await computeMetrics(env.DB, nextDay);
     expect(after.uniqueUsers30d).toBe(4);
     expect(after.versionMix7d.denominator).toBe(3);
+    // Oct 1 is the last complete day and held A, B, C.
+    expect(after.dailyActive).toBe(3);
+    // The same distinct set the version mix divides: A, B, C (D is 20 days old).
+    expect(after.weeklyActive).toBe(3);
+    expect(after.weeklyActive).toBe(after.versionMix7d.denominator);
     expect(after.concurrentNow).toBe(0);
   });
 
@@ -140,7 +158,21 @@ describe("rollup math against a fixture with known answers", () => {
       peakConcurrentBucket: null,
       uniqueUsers30d: 0,
       versionMix7d: { denominator: 0, versions: [] },
+      dailyActive: 0,
+      weeklyActive: 0,
     });
+  });
+
+  it("daily and weekly active differ when an install went quiet mid-week", async () => {
+    const DAY1 = Date.parse("2026-10-01T00:00:00Z");
+    await beat(A, "2.0.0", DAY1 - 3 * DAY + 60 * MIN); // Sep 28: inside 7 days of Oct 1's end, not on Oct 1
+    await beat(B, "2.0.0", DAY1 + 60 * MIN); // Oct 1
+    await beat(C, "2.0.0", DAY1 + DAY - 1); // Oct 1, last ms of the day
+    await beat(D, "2.0.0", DAY1 + DAY); // Oct 2, first ms: not part of Oct 1
+    await writeDailyRollups(env.DB, DAY1 + DAY + 5 * MIN);
+    const m = await computeMetrics(env.DB, DAY1 + DAY + 5 * MIN);
+    expect(m.dailyActive).toBe(2); // B, C
+    expect(m.weeklyActive).toBe(3); // A, B, C
   });
 
   it("a closed bucket's count is final: a later delete does not rewrite it", async () => {
@@ -160,10 +192,10 @@ describe("rollup math against a fixture with known answers", () => {
 describe("daily rollups", () => {
   const DAY1 = Date.parse("2026-10-01T00:00:00Z");
 
-  async function daily(): Promise<Array<{ day: string; unique_30d: number; version_mix_7d: string }>> {
+  async function daily(): Promise<Array<{ day: string; unique_30d: number; version_mix_7d: string; active_1d: number }>> {
     const { results } = await env.DB
-      .prepare("SELECT day, unique_30d, version_mix_7d FROM daily_rollup ORDER BY day")
-      .all<{ day: string; unique_30d: number; version_mix_7d: string }>();
+      .prepare("SELECT day, unique_30d, version_mix_7d, active_1d FROM daily_rollup ORDER BY day")
+      .all<{ day: string; unique_30d: number; version_mix_7d: string; active_1d: number }>();
     return results;
   }
 
@@ -175,10 +207,10 @@ describe("daily rollups", () => {
     // First cron run of Oct 4th: Oct 1, 2 and 3 are complete; Oct 4 is not.
     await writeDailyRollups(env.DB, DAY1 + 3 * DAY + 5 * MIN);
     const rows = await daily();
-    expect(rows.map((r) => [r.day, r.unique_30d])).toEqual([
-      ["2026-10-01", 1],
-      ["2026-10-02", 1],
-      ["2026-10-03", 2],
+    expect(rows.map((r) => [r.day, r.unique_30d, r.active_1d])).toEqual([
+      ["2026-10-01", 1, 1], // A
+      ["2026-10-02", 1, 0], // A still inside 30 days; nobody beat on Oct 2
+      ["2026-10-03", 2, 2], // A and B
     ]);
     expect(JSON.parse(rows[0].version_mix_7d)).toEqual({
       denominator: 1,
@@ -306,6 +338,8 @@ describe("GET /metrics.json", () => {
       "peakConcurrentBucket",
       "uniqueUsers30d",
       "versionMix7d",
+      "dailyActive",
+      "weeklyActive",
       "definitions",
     ]);
     expect(body).toMatchObject({
@@ -315,6 +349,9 @@ describe("GET /metrics.json", () => {
       peakConcurrent: 3,
       // Rolled up through 2026-09-30: D (20 days before T0) is the only install then.
       uniqueUsers30d: 1,
+      // Sep 29, the last complete day, held nobody; D is outside its 7 days too.
+      dailyActive: 0,
+      weeklyActive: 0,
     });
     expect(body.definitions).toEqual(DEFINITIONS);
     expect(JSON.stringify(body)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/); // no install id leaks into the public file
@@ -342,7 +379,7 @@ describe("the storage shape", () => {
   const EXPECTED: Record<string, string[]> = {
     heartbeat: ["install_id", "bucket_start", "app_version", "os", "last_seen_ms"],
     bucket_count: ["bucket_start", "distinct_ids"],
-    daily_rollup: ["day", "unique_30d", "version_mix_7d"],
+    daily_rollup: ["day", "unique_30d", "version_mix_7d", "active_1d"],
     metrics_snapshot: ["id", "generated_at", "body"],
   };
 
