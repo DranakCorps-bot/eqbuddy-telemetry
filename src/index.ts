@@ -1,6 +1,7 @@
 // EQBuddy Evolved opt-in telemetry backend.
 //
-// Contract: EQBuddy docs/v2/telemetry.md §2–§6. Three routes and a cron.
+// Contract: EQBuddy docs/v2/telemetry.md §2–§6. Two POST routes, the public
+// GET routes (metrics, history and the report widget, DRA-380) and a cron.
 //
 // What this file deliberately never does: read a request's address (no
 // client-address header, no header of any kind, no per-request edge
@@ -9,7 +10,16 @@
 // test/static/guards.test.ts holds all of that, by name.
 
 import { parseDelete, parseHeartbeat, MAX_BODY_BYTES } from "./validate";
-import { computeMetrics, deleteInstall, readMetricsSnapshot, recordHeartbeat, runScheduled } from "./store";
+import {
+  computeHistory,
+  computeMetrics,
+  deleteInstall,
+  readHistorySnapshot,
+  readMetricsSnapshot,
+  recordHeartbeat,
+  runScheduled,
+} from "./store";
+import { REPORT_HTML, WIDGET_CSS, WIDGET_JS } from "./widget";
 
 export interface Env {
   DB: D1Database;
@@ -69,19 +79,53 @@ async function deleteRoute(request: Request, env: Env): Promise<Response> {
   return empty(204);
 }
 
+/** /report may load only its own widget and JSON: no CDN, font or third-party script. */
+const REPORT_CSP =
+  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'";
+
+/**
+ * Every public GET answers the same way: 200, cacheable for 10 minutes, and
+ * CORS-open (Access-Control-Allow-Origin: *), because it is a read-only,
+ * id-free aggregate or a static asset. The POST routes carry none of this.
+ */
+function publicGet(method: string, body: string, contentType: string, extra?: Record<string, string>): Response {
+  return new Response(method === "HEAD" ? null : body, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": `public, max-age=${METRICS_CACHE_SECONDS}`,
+      "Access-Control-Allow-Origin": "*",
+      "X-Content-Type-Options": "nosniff",
+      ...extra,
+    },
+  });
+}
+
+const JSON_TYPE = "application/json; charset=utf-8";
+
 async function metrics(env: Env, nowMs: number, method: string): Promise<Response> {
   // Before the first cron pass there is no snapshot; answer live figures
   // rather than a 404, without writing anything.
   const body = (await readMetricsSnapshot(env.DB)) ?? JSON.stringify(await computeMetrics(env.DB, nowMs));
-  return new Response(method === "HEAD" ? null : body, {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": `public, max-age=${METRICS_CACHE_SECONDS}`,
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
+  return publicGet(method, body, JSON_TYPE);
 }
+
+async function history(env: Env, nowMs: number, method: string): Promise<Response> {
+  // Same rule as metrics.json: one snapshot read, or a live build (from the
+  // aggregate tables only) before the first cron pass.
+  const body = (await readHistorySnapshot(env.DB)) ?? JSON.stringify(await computeHistory(env.DB, nowMs));
+  return publicGet(method, body, JSON_TYPE);
+}
+
+/** The public GET routes. Each answers GET and HEAD; anything else is 405. */
+const GET_ROUTES: Record<string, (env: Env, nowMs: number, method: string) => Response | Promise<Response>> = {
+  "/metrics.json": metrics,
+  "/history.json": history,
+  "/widget.js": (_env, _now, method) => publicGet(method, WIDGET_JS, "text/javascript; charset=utf-8"),
+  "/widget.css": (_env, _now, method) => publicGet(method, WIDGET_CSS, "text/css; charset=utf-8"),
+  "/report": (_env, _now, method) =>
+    publicGet(method, REPORT_HTML, "text/html; charset=utf-8", { "Content-Security-Policy": REPORT_CSP }),
+};
 
 export async function handle(request: Request, env: Env, nowMs: number): Promise<Response> {
   const { pathname } = new URL(request.url);
@@ -91,11 +135,10 @@ export async function handle(request: Request, env: Env, nowMs: number): Promise
       return method === "POST" ? heartbeat(request, env, nowMs) : empty(405, { Allow: "POST" });
     case "/delete":
       return method === "POST" ? deleteRoute(request, env) : empty(405, { Allow: "POST" });
-    case "/metrics.json":
-      return method === "GET" || method === "HEAD" ? metrics(env, nowMs, method) : empty(405, { Allow: "GET, HEAD" });
-    default:
-      return empty(404);
   }
+  const route = Object.prototype.hasOwnProperty.call(GET_ROUTES, pathname) ? GET_ROUTES[pathname] : undefined;
+  if (!route) return empty(404);
+  return method === "GET" || method === "HEAD" ? route(env, nowMs, method) : empty(405, { Allow: "GET, HEAD" });
 }
 
 export default {

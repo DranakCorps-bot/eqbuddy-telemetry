@@ -168,7 +168,8 @@ export async function peakConcurrent(db: D1Database): Promise<{ count: number; b
  * queries, and Workers Free allows 50 queries per invocation (Cloudflare's D1
  * limits page, read 2026-09-24). Without a cap, catching up after a cron
  * outage of about two weeks would throw before the purge and the snapshot ran.
- * Seven days is 28 queries, so a whole pass stays under 40. The rest of the
+ * Seven days is 28 queries, so a whole pass (with both snapshots) stays under
+ * 40. The rest of the
  * backlog waits for the next pass, ten minutes later.
  */
 export const MAX_ROLLUP_DAYS_PER_PASS = 7;
@@ -201,11 +202,70 @@ export async function writeDailyRollups(db: D1Database, nowMs: number): Promise<
     const unique = await uniqueUsers30d(db, endOfDay);
     const mix = await versionMix(db, endOfDay);
     const active = await dailyActive(db, endOfDay);
+    // The day's usage is summed from its closed buckets inside the same
+    // statement, so the pass still costs four queries a day. closeBuckets runs
+    // first in the pass, so a completed day's last bucket is already closed.
     await db
-      .prepare(`INSERT OR IGNORE INTO daily_rollup (day, unique_30d, version_mix_7d, active_1d) VALUES (?1, ?2, ?3, ?4)`)
-      .bind(dayKey(dayMs), unique, JSON.stringify(mix), active)
+      .prepare(
+        `INSERT OR IGNORE INTO daily_rollup (day, unique_30d, version_mix_7d, active_1d, usage_buckets_1d)
+         SELECT ?1, ?2, ?3, ?4, COALESCE(SUM(distinct_ids), 0)
+         FROM bucket_count WHERE bucket_start >= ?5 AND bucket_start < ?6`,
+      )
+      .bind(dayKey(dayMs), unique, JSON.stringify(mix), active, iso(dayMs), iso(dayMs + DAY_MS))
       .run();
   }
+}
+
+/** One daily_rollup row, as the metrics and the history read it. */
+export interface RollupRow {
+  day: string;
+  unique_30d: number;
+  version_mix_7d: string;
+  active_1d: number;
+  usage_buckets_1d: number;
+}
+
+/**
+ * Every rollup row, oldest first: one row per day since launch. metrics.json
+ * and history.json are both built from this ONE read per cron pass.
+ */
+export async function readRollups(db: D1Database): Promise<RollupRow[]> {
+  const { results } = await db
+    .prepare(`SELECT day, unique_30d, version_mix_7d, active_1d, usage_buckets_1d FROM daily_rollup ORDER BY day ASC`)
+    .all<RollupRow>();
+  return results;
+}
+
+/** Each distinct install in a 10-minute bucket is 10 minutes of use. Two decimals. */
+export function bucketsToHours(installBuckets: number): number {
+  return Math.round((installBuckets * 10 * 100) / 60) / 100;
+}
+
+export interface UsageHours {
+  yesterday: number;
+  last7d: number;
+  last30d: number;
+  allTime: number;
+}
+
+/**
+ * Usage hours over the days ending with the last complete UTC day (the latest
+ * rollup), like every other daily number. allTime sums every rollup row, and
+ * rollups are never purged, so it outlives the raw heartbeats.
+ */
+export function usageHoursFrom(rows: readonly RollupRow[]): UsageHours {
+  if (rows.length === 0) return { yesterday: 0, last7d: 0, last30d: 0, allTime: 0 };
+  const lastMs = Date.parse(`${rows[rows.length - 1].day}T00:00:00Z`);
+  const sumSince = (days: number): number => {
+    const from = dayKey(lastMs - (days - 1) * DAY_MS);
+    return rows.filter((r) => r.day >= from).reduce((s, r) => s + r.usage_buckets_1d, 0);
+  };
+  return {
+    yesterday: bucketsToHours(sumSince(1)),
+    last7d: bucketsToHours(sumSince(7)),
+    last30d: bucketsToHours(sumSince(30)),
+    allTime: bucketsToHours(rows.reduce((s, r) => s + r.usage_buckets_1d, 0)),
+  };
 }
 
 /** The public definitions, published beside the numbers (TEL-003). */
@@ -220,6 +280,8 @@ export const DEFINITIONS = {
     "Distinct opted-in installs that sent a heartbeat in the last complete UTC day (the 24 hours up to its end).",
   weeklyActive:
     "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
+  usageHours:
+    "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it; allTime is every complete UTC day since launch.",
 } as const;
 
 export interface Metrics {
@@ -232,6 +294,7 @@ export interface Metrics {
   versionMix7d: VersionMix;
   dailyActive: number;
   weeklyActive: number;
+  usageHours: UsageHours;
   definitions: typeof DEFINITIONS;
 }
 
@@ -247,18 +310,18 @@ export interface Metrics {
  * is the same distinct set over the same window, and one producer cannot
  * disagree with itself.
  */
-async function latestDaily(db: D1Database): Promise<{ unique30d: number; active1d: number; mix: VersionMix }> {
-  const row = await db
-    .prepare(`SELECT unique_30d, version_mix_7d, active_1d FROM daily_rollup ORDER BY day DESC LIMIT 1`)
-    .first<{ unique_30d: number; version_mix_7d: string; active_1d: number }>();
+function latestDaily(rows: readonly RollupRow[]): { unique30d: number; active1d: number; mix: VersionMix } {
+  const row = rows[rows.length - 1];
   return row
     ? { unique30d: row.unique_30d, active1d: row.active_1d, mix: JSON.parse(row.version_mix_7d) as VersionMix }
     : { unique30d: 0, active1d: 0, mix: { denominator: 0, versions: [] } };
 }
 
-export async function computeMetrics(db: D1Database, nowMs: number): Promise<Metrics> {
+/** `rollups` lets the cron pass share one read with the history; omitted, it is read here. */
+export async function computeMetrics(db: D1Database, nowMs: number, rollups?: readonly RollupRow[]): Promise<Metrics> {
+  const rows = rollups ?? (await readRollups(db));
   const peak = await peakConcurrent(db);
-  const daily = await latestDaily(db);
+  const daily = latestDaily(rows);
   return {
     schema: 1,
     generatedAt: iso(nowMs),
@@ -269,12 +332,13 @@ export async function computeMetrics(db: D1Database, nowMs: number): Promise<Met
     versionMix7d: daily.mix,
     dailyActive: daily.active1d,
     weeklyActive: daily.mix.denominator,
+    usageHours: usageHoursFrom(rows),
     definitions: DEFINITIONS,
   };
 }
 
-export async function writeMetricsSnapshot(db: D1Database, nowMs: number): Promise<Metrics> {
-  const metrics = await computeMetrics(db, nowMs);
+export async function writeMetricsSnapshot(db: D1Database, nowMs: number, rollups?: readonly RollupRow[]): Promise<Metrics> {
+  const metrics = await computeMetrics(db, nowMs, rollups);
   await db
     .prepare(
       `INSERT INTO metrics_snapshot (id, generated_at, body) VALUES (1, ?1, ?2)
@@ -290,11 +354,100 @@ export async function readMetricsSnapshot(db: D1Database): Promise<string | null
   return row?.body ?? null;
 }
 
-/** The whole cron pass, in dependency order. */
+/** The concurrent chart reaches back this far; older buckets live on only as rollups. */
+export const HISTORY_BUCKET_WINDOW_MS = 7 * DAY_MS;
+
+/** The public definitions of history.json's fields (TEL-003), beside the data. */
+export const HISTORY_DEFINITIONS = {
+  days:
+    "One entry per complete UTC day since launch, oldest first. Each figure is as of the end of that day, exactly as metrics.json published it then.",
+  day: "The UTC day, YYYY-MM-DD.",
+  dailyActive: "Distinct opted-in installs that sent a heartbeat in that UTC day.",
+  weeklyActive: "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of that UTC day.",
+  uniqueUsers30d: "Distinct opted-in installs in the 30 days up to the end of that UTC day. An install, not a person.",
+  usageHours:
+    "Estimated hours of use that UTC day by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes.",
+  versionMix7d: "The metrics.json versionMix7d object as of the end of that UTC day.",
+  concurrent10m:
+    "Distinct opted-in installs in each closed 10-minute UTC window of the last 7 days, oldest first. A window nobody was seen in has no entry and means 0.",
+  bucket: "The window's start, ISO-8601 UTC.",
+  count: "Distinct opted-in installs seen in that window.",
+} as const;
+
+export interface HistoryDay {
+  day: string;
+  dailyActive: number;
+  weeklyActive: number;
+  uniqueUsers30d: number;
+  usageHours: number;
+  versionMix7d: VersionMix;
+}
+
+export interface History {
+  schema: 1;
+  generatedAt: string;
+  days: HistoryDay[];
+  concurrent10m: Array<{ bucket: string; count: number }>;
+  definitions: typeof HISTORY_DEFINITIONS;
+}
+
+/**
+ * Built only from the id-free aggregate tables: daily_rollup and the last
+ * week of bucket_count (at most 1,008 rows). Never reads heartbeat.
+ */
+export async function computeHistory(db: D1Database, nowMs: number, rollups?: readonly RollupRow[]): Promise<History> {
+  const rows = rollups ?? (await readRollups(db));
+  const { results } = await db
+    .prepare(`SELECT bucket_start, distinct_ids FROM bucket_count WHERE bucket_start >= ?1 ORDER BY bucket_start ASC`)
+    .bind(bucketStart(nowMs - HISTORY_BUCKET_WINDOW_MS))
+    .all<{ bucket_start: string; distinct_ids: number }>();
+  return {
+    schema: 1,
+    generatedAt: iso(nowMs),
+    days: rows.map((r) => {
+      const mix = JSON.parse(r.version_mix_7d) as VersionMix;
+      return {
+        day: r.day,
+        dailyActive: r.active_1d,
+        weeklyActive: mix.denominator,
+        uniqueUsers30d: r.unique_30d,
+        usageHours: bucketsToHours(r.usage_buckets_1d),
+        versionMix7d: mix,
+      };
+    }),
+    concurrent10m: results.map((b) => ({ bucket: b.bucket_start, count: b.distinct_ids })),
+    definitions: HISTORY_DEFINITIONS,
+  };
+}
+
+export async function writeHistorySnapshot(db: D1Database, nowMs: number, rollups?: readonly RollupRow[]): Promise<History> {
+  const history = await computeHistory(db, nowMs, rollups);
+  await db
+    .prepare(
+      `INSERT INTO history_snapshot (id, generated_at, body) VALUES (1, ?1, ?2)
+       ON CONFLICT (id) DO UPDATE SET generated_at = excluded.generated_at, body = excluded.body`,
+    )
+    .bind(history.generatedAt, JSON.stringify(history))
+    .run();
+  return history;
+}
+
+export async function readHistorySnapshot(db: D1Database): Promise<string | null> {
+  const row = await db.prepare(`SELECT body FROM history_snapshot WHERE id = 1`).first<{ body: string }>();
+  return row?.body ?? null;
+}
+
+/**
+ * The whole cron pass, in dependency order. The rollup (which records each
+ * day's usage) runs before the purge, and the two snapshots share one read of
+ * the rollups.
+ */
 export async function runScheduled(db: D1Database, nowMs: number): Promise<void> {
   await closeBuckets(db, nowMs);
   await writeDailyRollups(db, nowMs);
   await purgeExpired(db, nowMs);
-  await writeMetricsSnapshot(db, nowMs);
+  const rollups = await readRollups(db);
+  await writeMetricsSnapshot(db, nowMs, rollups);
+  await writeHistorySnapshot(db, nowMs, rollups);
 }
 
