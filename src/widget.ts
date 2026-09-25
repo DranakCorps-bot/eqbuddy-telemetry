@@ -502,7 +502,8 @@ export const WIDGET_CSS = String.raw`/* EQBuddy Evolved telemetry widget. Every 
 .eqbt-key::before { content: ""; display: inline-block; width: 12px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
 .eqbt-key-s1::before { background: var(--eqbt-accent, var(--eqbt-d-s1)); }
 .eqbt-key-s2::before { background: var(--eqbt-accent-2, var(--eqbt-d-s2)); }
-.eqbt-plot { position: relative; height: var(--eqbt-chart-height, 160px); margin-top: 20px; touch-action: pan-y; }
+/* The y labels sit in a left gutter outside the plot box, so they never cover the first bar or point. */
+.eqbt-plot { position: relative; height: var(--eqbt-chart-height, 160px); margin: 20px 0 0 44px; touch-action: pan-y; }
 .eqbt-svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .eqbt-grid { stroke: var(--eqbt-border, var(--eqbt-d-border)); stroke-width: 1; }
 .eqbt-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
@@ -512,12 +513,12 @@ export const WIDGET_CSS = String.raw`/* EQBuddy Evolved telemetry widget. Every 
 .eqbt-bar { fill: var(--eqbt-accent, var(--eqbt-d-s1)); }
 .eqbt-vtrack { fill: var(--eqbt-border, var(--eqbt-d-border)); }
 .eqbt-ymax, .eqbt-ymid {
-  position: absolute; left: 0; transform: translateY(-100%);
+  position: absolute; right: 100%; padding-right: 6px; transform: translateY(-50%); white-space: nowrap;
   font-size: 0.75em; color: var(--eqbt-muted, var(--eqbt-d-muted)); font-variant-numeric: tabular-nums;
 }
 .eqbt-ymax { top: 0; }
 .eqbt-ymid { top: 50%; }
-.eqbt-xaxis { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: 0.75em; color: var(--eqbt-muted, var(--eqbt-d-muted)); }
+.eqbt-xaxis { display: flex; justify-content: space-between; gap: 8px; margin: 4px 0 0 44px;font-size: 0.75em; color: var(--eqbt-muted, var(--eqbt-d-muted)); }
 .eqbt-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--eqbt-muted, var(--eqbt-d-muted)); pointer-events: none; }
 .eqbt-tip {
   position: absolute; top: -4px; transform: translate(-50%, -100%);
