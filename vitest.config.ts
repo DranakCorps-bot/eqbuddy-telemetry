@@ -29,6 +29,14 @@ export default defineConfig(async () => {
             include: ["test/static/**/*.test.ts"],
           },
         },
+        {
+          // Runs the served widget script, as text, against a stub DOM.
+          test: {
+            name: "widget",
+            environment: "node",
+            include: ["test/widget/**/*.test.ts"],
+          },
+        },
       ],
     },
   };

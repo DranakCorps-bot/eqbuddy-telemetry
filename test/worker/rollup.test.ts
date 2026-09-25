@@ -267,6 +267,8 @@ describe("daily rollups", () => {
     // The pass got past the rollup: the snapshot was written.
     const snap = await env.DB.prepare("SELECT generated_at FROM metrics_snapshot WHERE id = 1").first<{ generated_at: string }>();
     expect(snap?.generated_at).toBe("2026-11-11T00:05:00Z");
+    const hist = await env.DB.prepare("SELECT generated_at FROM history_snapshot WHERE id = 1").first<{ generated_at: string }>();
+    expect(hist?.generated_at).toBe("2026-11-11T00:05:00Z");
 
     for (let pass = 1; pass <= 5; pass++) await runScheduled(env.DB, back + pass * 10 * MIN);
     const days = (await daily()).map((r) => r.day);
@@ -340,6 +342,7 @@ describe("GET /metrics.json", () => {
       "versionMix7d",
       "dailyActive",
       "weeklyActive",
+      "usageHours",
       "definitions",
     ]);
     expect(body).toMatchObject({
@@ -379,8 +382,9 @@ describe("the storage shape", () => {
   const EXPECTED: Record<string, string[]> = {
     heartbeat: ["install_id", "bucket_start", "app_version", "os", "last_seen_ms"],
     bucket_count: ["bucket_start", "distinct_ids"],
-    daily_rollup: ["day", "unique_30d", "version_mix_7d", "active_1d"],
+    daily_rollup: ["day", "unique_30d", "version_mix_7d", "active_1d", "usage_buckets_1d"],
     metrics_snapshot: ["id", "generated_at", "body"],
+    history_snapshot: ["id", "generated_at", "body"],
   };
 
   it("has exactly the documented tables and columns", async () => {

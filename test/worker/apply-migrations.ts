@@ -11,5 +11,6 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM bucket_count"),
     env.DB.prepare("DELETE FROM daily_rollup"),
     env.DB.prepare("DELETE FROM metrics_snapshot"),
+    env.DB.prepare("DELETE FROM history_snapshot"),
   ]);
 });
