@@ -168,8 +168,8 @@ export async function peakConcurrent(db: D1Database): Promise<{ count: number; b
  * queries, and Workers Free allows 50 queries per invocation (Cloudflare's D1
  * limits page, read 2026-09-24). Without a cap, catching up after a cron
  * outage of about two weeks would throw before the purge and the snapshot ran.
- * Seven days is 28 queries, so a whole pass (with both snapshots) stays under
- * 40. The rest of the
+ * Seven days is 28 queries, so a whole pass (with both snapshots and the
+ * today-so-far read) stays under 40. The rest of the
  * backlog waits for the next pass, ten minutes later.
  */
 export const MAX_ROLLUP_DAYS_PER_PASS = 7;
@@ -246,15 +246,33 @@ export interface UsageHours {
   last7d: number;
   last30d: number;
   allTime: number;
+  todaySoFar: number;
 }
 
 /**
- * Usage hours over the days ending with the last complete UTC day (the latest
- * rollup), like every other daily number. allTime sums every rollup row, and
- * rollups are never purged, so it outlives the raw heartbeats.
+ * Install-buckets in the CURRENT UTC day's closed buckets. bucket_count only
+ * ever holds closed buckets, so the bucket in progress is not in it yet. It
+ * reads the id-free aggregate table whose per-bucket values history.json
+ * already publishes as concurrent10m: one bounded query, at most 144 rows.
  */
-export function usageHoursFrom(rows: readonly RollupRow[]): UsageHours {
-  if (rows.length === 0) return { yesterday: 0, last7d: 0, last30d: 0, allTime: 0 };
+export async function todayInstallBuckets(db: D1Database, nowMs: number): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COALESCE(SUM(distinct_ids), 0) AS n FROM bucket_count WHERE bucket_start >= ?1`)
+    .bind(iso(dayStartMs(nowMs)))
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * yesterday, last7d and last30d are the days ending with the last complete UTC
+ * day (the latest rollup), like every other daily number. todaySoFar is the
+ * current UTC day's closed buckets, and allTime is every rollup row PLUS
+ * today, so an "all time" figure never leaves out the day it is read on
+ * (DRA-426). Rollups are never purged, so allTime outlives the raw heartbeats.
+ */
+export function usageHoursFrom(rows: readonly RollupRow[], todayBuckets = 0): UsageHours {
+  const todaySoFar = bucketsToHours(todayBuckets);
+  if (rows.length === 0) return { yesterday: 0, last7d: 0, last30d: 0, allTime: todaySoFar, todaySoFar };
   const lastMs = Date.parse(`${rows[rows.length - 1].day}T00:00:00Z`);
   const sumSince = (days: number): number => {
     const from = dayKey(lastMs - (days - 1) * DAY_MS);
@@ -264,7 +282,8 @@ export function usageHoursFrom(rows: readonly RollupRow[]): UsageHours {
     yesterday: bucketsToHours(sumSince(1)),
     last7d: bucketsToHours(sumSince(7)),
     last30d: bucketsToHours(sumSince(30)),
-    allTime: bucketsToHours(rows.reduce((s, r) => s + r.usage_buckets_1d, 0)),
+    allTime: bucketsToHours(rows.reduce((s, r) => s + r.usage_buckets_1d, 0) + todayBuckets),
+    todaySoFar,
   };
 }
 
@@ -281,7 +300,7 @@ export const DEFINITIONS = {
   weeklyActive:
     "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
   usageHours:
-    "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it; allTime is every complete UTC day since launch.",
+    "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar.",
 } as const;
 
 export interface Metrics {
@@ -322,6 +341,7 @@ export async function computeMetrics(db: D1Database, nowMs: number, rollups?: re
   const rows = rollups ?? (await readRollups(db));
   const peak = await peakConcurrent(db);
   const daily = latestDaily(rows);
+  const todayBuckets = await todayInstallBuckets(db, nowMs);
   return {
     schema: 1,
     generatedAt: iso(nowMs),
@@ -332,7 +352,7 @@ export async function computeMetrics(db: D1Database, nowMs: number, rollups?: re
     versionMix7d: daily.mix,
     dailyActive: daily.active1d,
     weeklyActive: daily.mix.denominator,
-    usageHours: usageHoursFrom(rows),
+    usageHours: usageHoursFrom(rows, todayBuckets),
     definitions: DEFINITIONS,
   };
 }

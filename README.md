@@ -108,7 +108,7 @@ A test pins every column of every table. Adding one fails the build.
   },
   "dailyActive": 41,
   "weeklyActive": 96,
-  "usageHours": { "yesterday": 61.5, "last7d": 402.33, "last30d": 1650.17, "allTime": 2210.83 },
+  "usageHours": { "yesterday": 61.5, "last7d": 402.33, "last30d": 1650.17, "allTime": 2214.33, "todaySoFar": 3.5 },
   "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…" }
 }
 ```
@@ -121,12 +121,15 @@ A test pins every column of every table. Adding one fails the build.
 | `versionMix7d` | Among distinct ids in the 7 days up to the end of the last complete UTC day, the share on each version, counting each id once on its **latest** version | Daily |
 | `dailyActive` | Distinct ids with a heartbeat in the last complete UTC day (the 24 hours up to its end) | Daily |
 | `weeklyActive` | Distinct ids with a heartbeat in the 7 days up to the end of the last complete UTC day. The same set `versionMix7d` divides, so it always equals `versionMix7d.denominator` | Daily |
-| `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it. `allTime` is every complete UTC day since launch | Daily |
+| `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar` | Daily; `todaySoFar` and `allTime` every 10 minutes |
 
 **Usage hours are computed on the server only**, from the id-free
 `bucket_count` table. The heartbeat payload did not change. The rollup writes
 each day's total into `daily_rollup.usage_buckets_1d`, and it runs before the
-90-day purge in the same pass. `allTime` sums that column. Rollups are never
+90-day purge in the same pass. `allTime` sums that column and adds today's
+closed buckets, read in one bounded query of `bucket_count` (the same per-bucket
+counts `history.json` already publishes as `concurrent10m`), which is also
+`todaySoFar` (DRA-426). Rollups are never
 purged, so the all-time total survives the purge of the raw rows (and would
 survive a purge of `bucket_count` too). It is an estimate: an install seen for
 one minute of a window counts as ten, and one that never heartbeats counts
@@ -238,7 +241,7 @@ script loads.
 | `dailyActive` | `dailyActive` |
 | `weeklyActive` | `weeklyActive` |
 | `uniqueUsers30d` | `uniqueUsers30d` |
-| `usageHours` | `usageHours.last7d`, with yesterday, 30 days and all time beneath |
+| `usageHours` | `usageHours.last7d` (labelled as complete UTC days), with today so far, yesterday, 30 days and all time beneath |
 
 | Chart | Shows |
 |---|---|

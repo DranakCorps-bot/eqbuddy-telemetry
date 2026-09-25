@@ -54,7 +54,7 @@ const METRICS = {
   },
   dailyActive: 41,
   weeklyActive: 96,
-  usageHours: { yesterday: 12.5, last7d: 80, last30d: 300.25, allTime: 1234.5 },
+  usageHours: { yesterday: 12.5, last7d: 80, last30d: 300.25, allTime: 1238, todaySoFar: 3.5 },
   definitions: { dailyActive: "Distinct opted-in installs that sent a heartbeat in the last complete UTC day." },
 };
 
@@ -81,7 +81,7 @@ const EMPTY_METRICS = {
   versionMix7d: { denominator: 0, versions: [] },
   dailyActive: 0,
   weeklyActive: 0,
-  usageHours: { yesterday: 0, last7d: 0, last30d: 0, allTime: 0 },
+  usageHours: { yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0 },
 };
 const EMPTY_HISTORY = { ...HISTORY, days: [], concurrent10m: [] };
 
@@ -140,7 +140,7 @@ describe("rendering", () => {
     expect(html).toContain(">140<");
     expect(html).toContain("10 minutes from Sep 27, 9:10 PM CDT");
     expect(html).toContain(">80<"); // usage hours, last 7 days
-    expect(html).toContain("Yesterday 12.5 · 30 days 300 · all time 1,235");
+    expect(html).toContain("Today so far 3.5 h · Yesterday 12.5 · 30 days 300 · all time 1,238");
     expect(html).toContain(METRICS.definitions.dailyActive);
     expect(html).toContain("83.3% (80)");
   });
@@ -206,6 +206,30 @@ describe("empty and thin data", () => {
     const html = load().render(METRICS, { ...HISTORY, days: HISTORY.days.slice(1) });
     expect(html).toContain('data-chart="actives" data-state="collecting"');
     expect(html).toContain('data-chart="usageHours" data-state="ready"');
+  });
+
+  it("the usage tile names its complete-UTC-day window, so the headline cannot read as today (DRA-426)", () => {
+    const api = load() as Api & { USAGE_WINDOW: string };
+    const html = api.render(METRICS, HISTORY, { tiles: "usageHours", charts: "none" });
+    expect(html).toContain("Usage hours, last 7 complete UTC days");
+    expect(api.USAGE_WINDOW).toMatch(/complete UTC days, so today is not in them/);
+    expect(html).toContain(api.USAGE_WINDOW);
+  });
+
+  it("today so far shows while the headline is still collecting, but a zero today does not", () => {
+    const today = { ...EMPTY_METRICS, usageHours: { ...EMPTY_METRICS.usageHours, allTime: 1.83, todaySoFar: 1.83 } };
+    const html = load().render(today, EMPTY_HISTORY, { tiles: "usageHours", charts: "none" });
+    expect(tileState(html, "usageHours")).toBe("collecting");
+    expect(html).toContain('<div class="eqbt-tile-sub">Today so far 1.8 h</div>');
+    const zero = load().render(EMPTY_METRICS, EMPTY_HISTORY, { tiles: "usageHours", charts: "none" });
+    expect(zero).not.toContain("eqbt-tile-sub");
+  });
+
+  it("a snapshot published before todaySoFar existed renders the old sub-line unchanged", () => {
+    const { todaySoFar: _, ...old } = METRICS.usageHours;
+    const html = load().render({ ...METRICS, usageHours: old }, HISTORY, { tiles: "usageHours", charts: "none" });
+    expect(html).toContain('<div class="eqbt-tile-sub">Yesterday 12.5 · 30 days 300 · all time 1,238</div>');
+    expect(html).not.toMatch(/Today so far \d/);
   });
 
   it("a zero after the first complete day is a real zero", () => {
