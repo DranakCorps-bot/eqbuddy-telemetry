@@ -81,8 +81,22 @@ describe("usageHours math", () => {
       last7d: 9, // (18 + 36) / 6
       last30d: 12, // (6 + 12 + 18 + 36) / 6
       allTime: 122, // 732 / 6
+      todaySoFar: 0,
     });
-    expect(usageHoursFrom([])).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0 });
+    expect(usageHoursFrom([])).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0 });
+  });
+
+  it("today's install-buckets are todaySoFar and join allTime, but no complete-day window (DRA-426)", () => {
+    const rows = [row("2026-09-08", 30), row("2026-09-09", 36)];
+    expect(usageHoursFrom(rows, 11)).toEqual({
+      yesterday: 6,
+      last7d: 11,
+      last30d: 11,
+      allTime: 12.83, // (66 + 11) / 6, summed in buckets before rounding
+      todaySoFar: 1.83, // 11 / 6: the Founder's 18:20Z-20:00Z afternoon
+    });
+    // Before the first complete day, all time is today.
+    expect(usageHoursFrom([], 3)).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0.5, todaySoFar: 0.5 });
   });
 
   it("the cron rolls each day's install-buckets into daily_rollup and metrics.json publishes the hours", async () => {
@@ -97,18 +111,74 @@ describe("usageHours math", () => {
       { day: "2026-10-02", usage_buckets_1d: 3 },
     ]);
     const m = await computeMetrics(env.DB, oct3);
-    expect(m.usageHours).toEqual({ yesterday: 0.5, last7d: 1.5, last30d: 1.5, allTime: 1.5 });
+    // 00:05 on Oct 3: no Oct 3 bucket has closed yet.
+    expect(m.usageHours).toEqual({ yesterday: 0.5, last7d: 1.5, last30d: 1.5, allTime: 1.5, todaySoFar: 0 });
     expect(m.definitions.usageHours).toBe(DEFINITIONS.usageHours);
     expect(DEFINITIONS.usageHours).toMatch(/Estimated.*opted-in installs only.*10-minute resolution/);
   });
 
-  it("the current, unfinished day is not counted until it completes", async () => {
+  it("mid-day: today's closed buckets are todaySoFar and in allTime, and in no complete-day window", async () => {
     await seedUsage();
     // Midday Oct 2: A's three Oct 2 buckets are closed, but Oct 2 has not ended.
     const noonOct2 = OCT1 + DAY + 12 * 60 * MIN;
     await runScheduled(env.DB, noonOct2);
     const m = await computeMetrics(env.DB, noonOct2);
-    expect(m.usageHours).toEqual({ yesterday: 1, last7d: 1, last30d: 1, allTime: 1 });
+    expect(m.usageHours).toEqual({ yesterday: 1, last7d: 1, last30d: 1, allTime: 1.5, todaySoFar: 0.5 });
+    // The cron's published snapshot says the same.
+    const snap = await env.DB.prepare("SELECT body FROM metrics_snapshot WHERE id = 1").first<{ body: string }>();
+    expect(JSON.parse(snap!.body).usageHours).toEqual(m.usageHours);
+  });
+
+  it("the bucket in progress is not counted until it closes", async () => {
+    // A beats at 12:01 and 12:05 on Oct 2; at 12:07 that bucket is still open.
+    await beat(A, OCT1 + DAY + 12 * 60 * MIN + MIN);
+    await beat(A, OCT1 + DAY + 12 * 60 * MIN + 5 * MIN);
+    await runScheduled(env.DB, OCT1 + DAY + 12 * 60 * MIN + 7 * MIN);
+    expect((await computeMetrics(env.DB, OCT1 + DAY + 12 * 60 * MIN + 7 * MIN)).usageHours.todaySoFar).toBe(0);
+    // The next pass, at 12:10, closes it.
+    await runScheduled(env.DB, OCT1 + DAY + 12 * 60 * MIN + 10 * MIN);
+    expect((await computeMetrics(env.DB, OCT1 + DAY + 12 * 60 * MIN + 10 * MIN)).usageHours.todaySoFar).toBe(0.17);
+  });
+
+  it("just after 00:00 UTC, todaySoFar counts only the new day's closed buckets, not yesterday's", async () => {
+    // A in the 23:40 and 23:50 buckets of Oct 1, and the 00:00 bucket of Oct 2; B in 00:00 too.
+    await beat(A, OCT1 + DAY - 20 * MIN + MIN);
+    await beat(A, OCT1 + DAY - 10 * MIN + MIN);
+    await beat(A, OCT1 + DAY + MIN);
+    await beat(B, OCT1 + DAY + 3 * MIN);
+    const now = OCT1 + DAY + 10 * MIN; // 00:10: the 00:00 bucket has just closed
+    await runScheduled(env.DB, now);
+    const m = await computeMetrics(env.DB, now);
+    expect(m.usageHours).toEqual({
+      yesterday: 0.33, // Oct 1: two install-buckets, now a complete day
+      last7d: 0.33,
+      last30d: 0.33,
+      allTime: 0.67, // 2 + 2 install-buckets
+      todaySoFar: 0.33, // the 00:00 bucket's A and B, and nothing from Oct 1
+    });
+  });
+
+  it("with no rows at all, todaySoFar and allTime are 0", async () => {
+    const m = await computeMetrics(env.DB, OCT1 + 12 * 60 * MIN);
+    expect(m.usageHours).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0 });
+  });
+
+  it("todaySoFar costs ONE bounded query, against the id-free bucket_count, never heartbeat", async () => {
+    await seedUsage();
+    const { db, sql } = recording();
+    await computeMetrics(db, OCT1 + DAY + 12 * 60 * MIN);
+    const bucketReads = sql.filter((q) => /FROM bucket_count WHERE bucket_start >= \?1/.test(q));
+    expect(bucketReads).toHaveLength(1);
+    expect(bucketReads[0]).not.toMatch(/\bheartbeat\b/);
+    // readRollups, peakConcurrent, todaySoFar, concurrentNow: one more than before DRA-427.
+    expect(sql).toHaveLength(4);
+  });
+
+  it("defines todaySoFar, its closed-window rule and its staleness, and says allTime includes today", () => {
+    expect(DEFINITIONS.usageHours).toMatch(/todaySoFar is the current UTC day's closed 10-minute windows only/);
+    expect(DEFINITIONS.usageHours).toMatch(/window in progress is not counted/);
+    expect(DEFINITIONS.usageHours).toMatch(/about 20 minutes behind/);
+    expect(DEFINITIONS.usageHours).toMatch(/allTime is every complete UTC day since launch plus todaySoFar/);
   });
 });
 

@@ -27,6 +27,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   var CHARTS = ["actives", "concurrent", "usageHours", "versions"];
   var OPT_IN_LABEL = "Opted-in installs only: a lower bound, not total users.";
   var USAGE_LABEL = "estimated, opted-in installs only, 10-minute resolution";
+  var USAGE_WINDOW = "7 days, yesterday and 30 days are complete UTC days, so today is not in them. Today so far and all time include today, up to about 20 minutes behind.";
   var COLLECTING = "collecting data";
   var BUCKET_MS = 600000;
   var DAY_MS = 86400000;
@@ -39,7 +40,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     dailyActive: "Daily active",
     weeklyActive: "Weekly active",
     uniqueUsers30d: "Unique installs, 30 days",
-    usageHours: "Usage hours, last 7 days"
+    usageHours: "Usage hours, last 7 complete UTC days"
   };
   var CHART_TITLES = {
     actives: "Daily and weekly active installs",
@@ -115,6 +116,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     var defs = (m && m.definitions) || {};
     var value = null;
     var sub = "";
+    var today = "";
     var extraNote = "";
     var fmt = num;
     if (m) {
@@ -129,19 +131,23 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
         var u = m.usageHours;
         value = u.last7d;
         fmt = hours;
+        // A snapshot written before todaySoFar existed simply has no today figure.
+        if (typeof u.todaySoFar === "number") today = "Today so far " + hours(u.todaySoFar) + " h";
         sub = "Yesterday " + hours(u.yesterday) + " · 30 days " + hours(u.last30d) + " · all time " + hours(u.allTime);
       }
     }
-    if (name === "usageHours") extraNote = USAGE_LABEL;
+    if (name === "usageHours") extraNote = USAGE_LABEL + ". " + USAGE_WINDOW;
     // Before the first complete UTC day, a zero is "not measured yet", not 0.
     var collecting = typeof value !== "number" || (value === 0 && daysOf(h).length === 0);
+    // Today is measured before any day completes, so a non-zero today shows even while the headline is collecting.
+    if (today) sub = !collecting ? today + " · " + sub : m.usageHours.todaySoFar > 0 ? today : "";
     var state = loading ? "loading" : collecting ? "collecting" : "ready";
     var shown = loading ? '<span class="eqbt-collecting">loading</span>'
       : collecting ? '<span class="eqbt-collecting">' + COLLECTING + "</span>" : esc(fmt(value));
     return '<div class="eqbt-tile" data-tile="' + name + '" data-state="' + state + '">' +
       '<div class="eqbt-tile-label">' + esc(TILE_LABELS[name]) + "</div>" +
       '<div class="eqbt-tile-value">' + shown + "</div>" +
-      (sub && !collecting ? '<div class="eqbt-tile-sub">' + esc(sub) + "</div>" : "") +
+      (sub && (!collecting || today) ? '<div class="eqbt-tile-sub">' + esc(sub) + "</div>" : "") +
       (extraNote ? '<div class="eqbt-tile-note">' + esc(extraNote) + "</div>" : "") +
       (defs[name] ? '<p class="eqbt-def">' + esc(defs[name]) + "</p>" : "") +
       "</div>";
@@ -423,6 +429,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     CHARTS: CHARTS.slice(),
     OPT_IN_LABEL: OPT_IN_LABEL,
     USAGE_LABEL: USAGE_LABEL,
+    USAGE_WINDOW: USAGE_WINDOW,
     select: select,
     render: render,
     mount: mount,
