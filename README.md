@@ -31,8 +31,8 @@ GET routes and one cron.
 
 | Request | Body | Answers |
 |---|---|---|
-| `POST /heartbeat` | Exactly `{"installId", "appVersion", "os"}` | `204` recorded. `400` any other key, a missing key, or a bad value; nothing stored. `429` a second heartbeat from the same id inside 60 s; nothing stored. |
-| `POST /delete` | Exactly `{"installId"}` | `204` every raw row for that id is gone. Also `204` when there were none, so the endpoint never says whether an id existed. `400` malformed. |
+| `POST /heartbeat` | Exactly `{"installId", "appVersion", "os"}` | `204` recorded (and, if the id has no raw row, the all-time install count goes up by one in the same transaction). `400` any other key, a missing key, or a bad value; nothing stored. `429` a second heartbeat from the same id inside 60 s; nothing stored. |
+| `POST /delete` | Exactly `{"installId"}` | `204` every raw row for that id is gone. Also `204` when there were none, so the endpoint never says whether an id existed. `400` malformed. The id-free aggregates, including the all-time install count, are not lowered. |
 | `GET /metrics.json` | — | `200`. The headline numbers. See [`metrics.json`](#metricsjson). |
 | `GET /history.json` | — | `200`. One entry per complete UTC day, and the last week of 10-minute counts. See [`history.json`](#historyjson). |
 | `GET /report` | — | `200`. The public report page, a thin page over the widget. See [The report and the widget](#the-report-and-the-widget). |
@@ -69,9 +69,11 @@ loses nothing.
 
 [`migrations/`](migrations/) is the entire storage shape: `0001_init.sql`
 creates it, `0002_daily_active.sql` adds one id-free count to
-`daily_rollup`, and `0003_usage_history.sql` adds each day's usage to
+`daily_rollup`, `0003_usage_history.sql` adds each day's usage to
 `daily_rollup` (backfilled from `bucket_count`) and creates the
-`history_snapshot` table. Only `heartbeat` holds an install id:
+`history_snapshot` table, and `0004_installs_all_time.sql` creates the
+one-row `all_time_total` count (backfilled from `heartbeat`). Only `heartbeat`
+holds an install id:
 
 | Table | Columns | Kept |
 |---|---|---|
@@ -80,6 +82,7 @@ creates it, `0002_daily_active.sql` adds one id-free count to
 | `daily_rollup` | `day`, `unique_30d`, `version_mix_7d`, `active_1d`, `usage_buckets_1d` | Indefinitely (no ids) |
 | `metrics_snapshot` | `id`, `generated_at`, `body` | One row, overwritten |
 | `history_snapshot` | `id`, `generated_at`, `body` | One row, overwritten |
+| `all_time_total` | `id`, `installs_first_seen` | One row, one integer, indefinitely (no ids). Only ever goes up |
 
 A heartbeat **upserts** one row per install per 10-minute bucket. The client
 sends every 5 minutes, so that is two writes against one row, and the table
@@ -109,7 +112,8 @@ A test pins every column of every table. Adding one fails the build.
   "dailyActive": 41,
   "weeklyActive": 96,
   "usageHours": { "yesterday": 61.5, "last7d": 402.33, "last30d": 1650.17, "allTime": 2214.33, "todaySoFar": 3.5 },
-  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…" }
+  "installsAllTime": 212,
+  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "installsAllTime": "…" }
 }
 ```
 
@@ -122,6 +126,7 @@ A test pins every column of every table. Adding one fails the build.
 | `dailyActive` | Distinct ids with a heartbeat in the last complete UTC day (the 24 hours up to its end) | Daily |
 | `weeklyActive` | Distinct ids with a heartbeat in the 7 days up to the end of the last complete UTC day. The same set `versionMix7d` divides, so it always equals `versionMix7d.denominator` | Daily |
 | `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar` | Daily; `todaySoFar` and `allTime` every 10 minutes |
+| `installsAllTime` | **Opted-in installs counted when first seen**, since launch: a lower bound, not total users. Each id adds one the first time it sends a heartbeat that finds no raw row for it. An install silent for more than 90 days, one whose data was deleted, and one that opted out and back in (a new id) each count again if they come back. `/delete` never lowers it | Every 10 minutes |
 
 **Usage hours are computed on the server only**, from the id-free
 `bucket_count` table. The heartbeat payload did not change. The rollup writes
@@ -147,6 +152,19 @@ tier's rows-read allowance 144 times a day on a number that barely moves. The
 1- and 7-day counts follow the same rule: a live 7-day scan every pass would
 cost a quarter of that, and a live 24-hour one would still be the largest read
 in the pass. Until the first UTC day completes, all four read zero.
+
+**The all-time install count keeps no install id.** It is one integer in
+`all_time_total`. A heartbeat whose id has no row in `heartbeat` adds one to it
+in the same D1 batch (one transaction) as the insert that gives the id its row,
+so two racing first heartbeats cannot both count, and the count and the raw
+table cannot disagree. "First seen" therefore means "first seen within the raw
+table's 90-day retention": nothing remembers an id past its last raw row, which
+is exactly the retention promise, and the price is that an install silent for
+more than 90 days counts again when it returns. `/delete` removes the raw rows
+and leaves the count alone: the count is an aggregate, with nothing in it to
+delete. Migration `0004` backfilled it as `COUNT(DISTINCT install_id)` over the
+raw table. The Worker went live on 2026-09-24, so before 2026-12-23 no raw row
+had aged out, and that is every install seen since launch (less any deleted).
 
 **Field names are stable.** The report widget reads `metrics.json` and
 `history.json`, and later the EQBuddy landing page will too. Fields are only
@@ -230,7 +248,7 @@ script loads.
 
 | Attribute | Default | Meaning |
 |---|---|---|
-| `data-tiles` | all | Tile names, space- or comma-separated, shown in the order given, or `all` or `none` |
+| `data-tiles` | every tile except `installsAllTime` | Tile names, space- or comma-separated, shown in the order given, or `all` (every tile, `installsAllTime` included) or `none` |
 | `data-charts` | all | Chart names, the same way |
 | `data-base` | the host `widget.js` came from | Where to fetch `metrics.json` and `history.json` |
 
@@ -242,6 +260,7 @@ script loads.
 | `weeklyActive` | `weeklyActive` |
 | `uniqueUsers30d` | `uniqueUsers30d` |
 | `usageHours` | `usageHours.last7d` (labelled as complete UTC days), with today so far, yesterday, 30 days and all time beneath |
+| `installsAllTime` | `installsAllTime`, labelled *Total installs (all time)*. **Not a default:** name it (or `all`) to show it. `/report` shows it, beside `uniqueUsers30d` |
 
 | Chart | Shows |
 |---|---|
@@ -310,9 +329,12 @@ is written down here so the rule can be checked.
   deleted again at 90 days. **Estimate, not a measurement:** somewhere between
   several hundred and about 1,500 opted-in installs playing a few hours a day.
   Moving to a paid plan costs money, and that is a decision for the project
-  owner, not for this code. Workers Free also allows only 50 D1 queries per
+  owner, not for this code. A heartbeat is two statements in one batch (the
+  all-time count's first-seen check, a primary-key lookup reading at most one
+  row, then the upsert); the count's row is written only on an install's first
+  heartbeat. Workers Free also allows only 50 D1 queries per
   invocation, so after a cron outage the daily rollup catches up at most 7
-  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass stays under 40 queries
+  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass is at most 40 queries
   and the backlog drains over the next passes.
 - **No licence has been chosen yet.** The code is public so it can be read and
   checked. Choosing a licence is the project owner's decision.
@@ -339,6 +361,11 @@ fixtures with known answers:
 - `test/widget/widget.test.ts`: the served `widget.js`, run in Node against a
   stub DOM. Covers every tile and chart, subset selection, the opt-in and usage
   labels, the collecting-data states, escaping, mounting and auto-mounting.
+- `test/worker/installs.test.ts`: the all-time install count: first seen adds
+  one; repeat, rate-limited and refused heartbeats add nothing; a same-moment
+  race counts once; `/delete` and the purge never lower it; a return after 90
+  days or after a delete counts again; migration `0004`'s backfill run against
+  a seeded raw table; and the `metrics.json` field and its definition.
 - `test/worker/rollup.test.ts`: bucket closing, all six public numbers, window
   edges to the millisecond, daily catch-up, the 90-day purge boundary,
   aggregates that outlive the purge, the `metrics.json` shape and headers, and
@@ -354,6 +381,17 @@ This needs the Cloudflare account, and nothing in this repository has done it:
 npx wrangler d1 create eqbuddy-telemetry      # put the printed id in wrangler.jsonc
 npx wrangler d1 migrations apply eqbuddy-telemetry --remote
 npx wrangler deploy
+```
+
+**Upgrading a live deployment:** apply migrations **before** deploying code
+that reads the new tables. The heartbeat route writes `all_time_total`, so code
+deployed ahead of migration `0004` would fail every heartbeat. A heartbeat from
+a brand-new install that lands between the migration and the deploy is served
+by the old code and not counted. If that matters, run the backfill again right
+after the deploy. It only ever raises the figure, so it is safe to repeat:
+
+```sh
+npx wrangler d1 execute eqbuddy-telemetry --remote --command "UPDATE all_time_total SET installs_first_seen = MAX(installs_first_seen, (SELECT COUNT(DISTINCT install_id) FROM heartbeat)) WHERE id = 1"
 ```
 
 No secrets are involved. The Worker has no API keys, and the D1 id in

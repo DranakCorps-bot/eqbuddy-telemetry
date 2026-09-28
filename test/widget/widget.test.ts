@@ -4,15 +4,16 @@
 
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import { CHART_NAMES, TILE_NAMES, WIDGET_CSS, WIDGET_JS } from "../../src/widget";
+import { CHART_NAMES, DEFAULT_TILE_NAMES, REPORT_TILE_NAMES, TILE_NAMES, WIDGET_CSS, WIDGET_JS } from "../../src/widget";
 
 interface Api {
   version: number;
   TILES: string[];
+  DEFAULT_TILES: string[];
   CHARTS: string[];
   OPT_IN_LABEL: string;
   USAGE_LABEL: string;
-  select(value: unknown, all: string[]): string[];
+  select(value: unknown, all: string[], defaults?: string[]): string[];
   render(m: unknown, h: unknown, options?: { tiles?: unknown; charts?: unknown }, loading?: boolean): string;
   mount(el: FakeElement, opts?: Record<string, unknown>): Promise<FakeElement>;
 }
@@ -55,7 +56,11 @@ const METRICS = {
   dailyActive: 41,
   weeklyActive: 96,
   usageHours: { yesterday: 12.5, last7d: 80, last30d: 300.25, allTime: 1238, todaySoFar: 3.5 },
-  definitions: { dailyActive: "Distinct opted-in installs that sent a heartbeat in the last complete UTC day." },
+  installsAllTime: 1512,
+  definitions: {
+    dailyActive: "Distinct opted-in installs that sent a heartbeat in the last complete UTC day.",
+    installsAllTime: "Opted-in installs counted when first seen.",
+  },
 };
 
 const HISTORY = {
@@ -82,6 +87,7 @@ const EMPTY_METRICS = {
   dailyActive: 0,
   weeklyActive: 0,
   usageHours: { yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0 },
+  installsAllTime: 0,
 };
 const EMPTY_HISTORY = { ...HISTORY, days: [], concurrent10m: [] };
 
@@ -98,6 +104,7 @@ describe("the widget module", () => {
     const api = load();
     expect(api.version).toBe(1);
     expect(api.TILES).toEqual([...TILE_NAMES]);
+    expect(api.DEFAULT_TILES).toEqual([...DEFAULT_TILE_NAMES]);
     expect(api.CHARTS).toEqual([...CHART_NAMES]);
     expect(api.USAGE_LABEL).toBe("estimated, opted-in installs only, 10-minute resolution");
   });
@@ -125,12 +132,12 @@ describe("the widget module", () => {
 describe("rendering", () => {
   it("renders every tile and chart by default, with the opt-in and usage labels", () => {
     const html = load().render(METRICS, HISTORY);
-    expect(attrValues(html, "data-tile")).toEqual([...TILE_NAMES]);
+    expect(attrValues(html, "data-tile")).toEqual([...DEFAULT_TILE_NAMES]);
     expect(attrValues(html, "data-chart")).toEqual([...CHART_NAMES]);
     expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
     // The usage tile and the usage chart each carry the exact label.
     expect(html.split("estimated, opted-in installs only, 10-minute resolution")).toHaveLength(3);
-    for (const name of TILE_NAMES) expect(tileState(html, name), name).toBe("ready");
+    for (const name of DEFAULT_TILE_NAMES) expect(tileState(html, name), name).toBe("ready");
     expect(attrValues(html, "data-state").filter((s) => s !== "ready")).toEqual([]);
   });
 
@@ -189,7 +196,7 @@ describe("selecting a subset", () => {
 describe("empty and thin data", () => {
   it("before the first complete UTC day, zero figures read 'collecting data', not 0", () => {
     const html = load().render(EMPTY_METRICS, EMPTY_HISTORY);
-    for (const name of TILE_NAMES) expect(tileState(html, name), name).toBe("collecting");
+    for (const name of DEFAULT_TILE_NAMES) expect(tileState(html, name), name).toBe("collecting");
     for (const name of CHART_NAMES) expect(html, name).toContain(`data-chart="${name}" data-state="collecting"`);
     expect(html).toContain("collecting data");
     expect(html).not.toMatch(/eqbt-tile-value">0</);
@@ -238,9 +245,51 @@ describe("empty and thin data", () => {
   });
 
   it("with no data at all (a failed fetch) everything reads 'collecting data'", () => {
-    const html = load().render(null, null);
+    const html = load().render(null, null, { tiles: "all" });
     for (const name of TILE_NAMES) expect(tileState(html, name), name).toBe("collecting");
     expect(html).toContain("Figures are unavailable right now.");
+  });
+});
+
+describe("the all-time installs tile", () => {
+  it("is selectable by name but not a default: an embed that names no tiles renders what it did before", () => {
+    const api = load();
+    expect(TILE_NAMES).toContain("installsAllTime");
+    expect(DEFAULT_TILE_NAMES).not.toContain("installsAllTime");
+    expect(api.select(undefined, api.TILES, api.DEFAULT_TILES)).toEqual([...DEFAULT_TILE_NAMES]);
+    expect(api.select("all", api.TILES, api.DEFAULT_TILES)).toEqual([...TILE_NAMES]);
+    expect(api.select("installsAllTime", api.TILES, api.DEFAULT_TILES)).toEqual(["installsAllTime"]);
+    // Every default is a known tile, in the known order: the default set is the old list, unchanged.
+    expect(TILE_NAMES.filter((n) => (DEFAULT_TILE_NAMES as readonly string[]).includes(n))).toEqual([...DEFAULT_TILE_NAMES]);
+    expect(attrValues(api.render(METRICS, HISTORY), "data-tile")).not.toContain("installsAllTime");
+  });
+
+  it("shows the figure with its label and the server's definition", () => {
+    const html = load().render(METRICS, HISTORY, { tiles: "installsAllTime", charts: "none" });
+    expect(tileState(html, "installsAllTime")).toBe("ready");
+    expect(html).toContain("Total installs (all time)");
+    expect(html).toContain(">1,512<");
+    expect(html).toContain(METRICS.definitions.installsAllTime);
+    expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
+  });
+
+  it("a snapshot published before installsAllTime existed reads 'collecting data', never 0", () => {
+    const { installsAllTime: _, ...old } = METRICS;
+    const html = load().render(old, HISTORY, { tiles: "installsAllTime", charts: "none" });
+    expect(tileState(html, "installsAllTime")).toBe("collecting");
+    expect(html).not.toMatch(/eqbt-tile-value">0</);
+  });
+
+  it("a non-zero count shows before the first complete UTC day; a zero one reads 'collecting data'", () => {
+    const early = load().render({ ...EMPTY_METRICS, installsAllTime: 2 }, EMPTY_HISTORY, { tiles: "installsAllTime", charts: "none" });
+    expect(tileState(early, "installsAllTime")).toBe("ready");
+    const zero = load().render(EMPTY_METRICS, EMPTY_HISTORY, { tiles: "installsAllTime", charts: "none" });
+    expect(tileState(zero, "installsAllTime")).toBe("collecting");
+  });
+
+  it("the report's tile list is every default plus installsAllTime, beside the 30-day count", () => {
+    expect([...REPORT_TILE_NAMES].sort()).toEqual([...TILE_NAMES].sort());
+    expect(REPORT_TILE_NAMES.indexOf("installsAllTime")).toBe(REPORT_TILE_NAMES.indexOf("uniqueUsers30d") + 1);
   });
 });
 
