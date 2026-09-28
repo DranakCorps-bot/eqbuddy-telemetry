@@ -160,6 +160,7 @@ describe("rollup math against a fixture with known answers", () => {
       versionMix7d: { denominator: 0, versions: [] },
       dailyActive: 0,
       weeklyActive: 0,
+      installsAllTime: 0,
     });
   });
 
@@ -343,6 +344,7 @@ describe("GET /metrics.json", () => {
       "dailyActive",
       "weeklyActive",
       "usageHours",
+      "installsAllTime",
       "definitions",
     ]);
     expect(body).toMatchObject({
@@ -355,6 +357,8 @@ describe("GET /metrics.json", () => {
       // Sep 29, the last complete day, held nobody; D is outside its 7 days too.
       dailyActive: 0,
       weeklyActive: 0,
+      // A, B, C, D and E each counted once, when first seen; D's later beat is not in the snapshot yet and is not new anyway.
+      installsAllTime: 5,
     });
     expect(body.definitions).toEqual(DEFINITIONS);
     expect(JSON.stringify(body)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/); // no install id leaks into the public file
@@ -385,6 +389,7 @@ describe("the storage shape", () => {
     daily_rollup: ["day", "unique_30d", "version_mix_7d", "active_1d", "usage_buckets_1d"],
     metrics_snapshot: ["id", "generated_at", "body"],
     history_snapshot: ["id", "generated_at", "body"],
+    all_time_total: ["id", "installs_first_seen"],
   };
 
   it("has exactly the documented tables and columns", async () => {

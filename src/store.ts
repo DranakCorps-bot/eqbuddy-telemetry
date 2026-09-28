@@ -27,29 +27,56 @@ export type RecordOutcome = "recorded" | "rate-limited";
  * The check is bounded by the primary key (install_id, bucket_start >= the
  * bucket 60 s ago), so it reads at most two rows however long the install
  * has been sending: D1's free tier counts rows READ.
+ *
+ * installsAllTime rides in the same D1 batch, which D1 runs as one
+ * transaction: the first statement adds one to the all-time count if this id
+ * has NO raw row, the second writes the row. An id with no row is never
+ * rate-limited (the limit reads its rows), so the two always agree, and two
+ * racing first heartbeats cannot both count: the batch that commits first
+ * leaves a row the second one sees. The absence check is a primary-key prefix
+ * lookup, so it reads at most one row.
  */
 export async function recordHeartbeat(db: D1Database, hb: Heartbeat, nowMs: number): Promise<RecordOutcome> {
-  const result = await db
-    .prepare(
-      `INSERT INTO heartbeat (install_id, bucket_start, app_version, os, last_seen_ms)
-       SELECT ?1, ?2, ?3, ?4, ?5
-       WHERE NOT EXISTS (
-         SELECT 1 FROM heartbeat
-         WHERE install_id = ?1 AND bucket_start >= ?7 AND last_seen_ms > ?6
-       )
-       ON CONFLICT (install_id, bucket_start) DO UPDATE SET
-         app_version  = excluded.app_version,
-         os           = excluded.os,
-         last_seen_ms = excluded.last_seen_ms`,
-    )
-    .bind(hb.installId, bucketStart(nowMs), hb.appVersion, hb.os, nowMs, nowMs - RATE_LIMIT_MS, bucketStart(nowMs - RATE_LIMIT_MS))
-    .run();
+  const [, result] = await db.batch([
+    db
+      .prepare(
+        `UPDATE all_time_total SET installs_first_seen = installs_first_seen + 1
+         WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM heartbeat WHERE install_id = ?1)`,
+      )
+      .bind(hb.installId),
+    db
+      .prepare(
+        `INSERT INTO heartbeat (install_id, bucket_start, app_version, os, last_seen_ms)
+         SELECT ?1, ?2, ?3, ?4, ?5
+         WHERE NOT EXISTS (
+           SELECT 1 FROM heartbeat
+           WHERE install_id = ?1 AND bucket_start >= ?7 AND last_seen_ms > ?6
+         )
+         ON CONFLICT (install_id, bucket_start) DO UPDATE SET
+           app_version  = excluded.app_version,
+           os           = excluded.os,
+           last_seen_ms = excluded.last_seen_ms`,
+      )
+      .bind(hb.installId, bucketStart(nowMs), hb.appVersion, hb.os, nowMs, nowMs - RATE_LIMIT_MS, bucketStart(nowMs - RATE_LIMIT_MS)),
+  ]);
   return result.meta.changes > 0 ? "recorded" : "rate-limited";
 }
 
-/** Hard-deletes every raw row for the id. Says nothing about whether any existed. */
+/**
+ * Hard-deletes every raw row for the id. Says nothing about whether any existed.
+ * Touches heartbeat only: installsAllTime is an aggregate holding no id, so a
+ * delete never lowers it.
+ */
 export async function deleteInstall(db: D1Database, installId: string): Promise<void> {
   await db.prepare(`DELETE FROM heartbeat WHERE install_id = ?1`).bind(installId).run();
+}
+
+/** The all-time first-seen count: one row, one read, no ids. 0 if the row is somehow absent. */
+export async function installsAllTime(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare(`SELECT installs_first_seen AS n FROM all_time_total WHERE id = 1`)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
 }
 
 /** Deletes raw rows whose bucket started more than RETENTION_DAYS before `now`. */
@@ -168,8 +195,8 @@ export async function peakConcurrent(db: D1Database): Promise<{ count: number; b
  * queries, and Workers Free allows 50 queries per invocation (Cloudflare's D1
  * limits page, read 2026-09-24). Without a cap, catching up after a cron
  * outage of about two weeks would throw before the purge and the snapshot ran.
- * Seven days is 28 queries, so a whole pass (with both snapshots and the
- * today-so-far read) stays under 40. The rest of the
+ * Seven days is 28 queries, so a whole pass (with both snapshots, the
+ * today-so-far read and the all-time installs read) is at most 40. The rest of the
  * backlog waits for the next pass, ten minutes later.
  */
 export const MAX_ROLLUP_DAYS_PER_PASS = 7;
@@ -301,6 +328,8 @@ export const DEFINITIONS = {
     "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
   usageHours:
     "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar.",
+  installsAllTime:
+    "Opted-in installs counted when first seen: each adds one the first time it sends a heartbeat. A lower bound, not total users: telemetry is off unless the player turns it on. It is a single running count, so no install id is kept to compute it; the raw heartbeats it is counted from are still deleted after 90 days. An install silent for more than 90 days, or one whose data was deleted, counts again if it comes back, and so does one that opts out and back in (a new id). Deleting an install's data does not lower it.",
 } as const;
 
 export interface Metrics {
@@ -314,6 +343,7 @@ export interface Metrics {
   dailyActive: number;
   weeklyActive: number;
   usageHours: UsageHours;
+  installsAllTime: number;
   definitions: typeof DEFINITIONS;
 }
 
@@ -353,6 +383,7 @@ export async function computeMetrics(db: D1Database, nowMs: number, rollups?: re
     dailyActive: daily.active1d,
     weeklyActive: daily.mix.denominator,
     usageHours: usageHoursFrom(rows, todayBuckets),
+    installsAllTime: await installsAllTime(db),
     definitions: DEFINITIONS,
   };
 }

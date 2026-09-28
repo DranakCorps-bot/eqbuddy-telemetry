@@ -13,8 +13,16 @@
 // any browser exactly as written here, and so the landing page can lift it
 // unchanged. test/widget/widget.test.ts runs it against a stub DOM.
 
-/** Tile names, in default order. Selectable with data-tiles or options.tiles. */
-export const TILE_NAMES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours"] as const;
+/**
+ * Every tile name, selectable with data-tiles or options.tiles; "all" is this list.
+ * installsAllTime is last and is NOT in the default set below, so an embed that
+ * names no tiles renders exactly what it rendered before the tile existed.
+ */
+export const TILE_NAMES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime"] as const;
+/** The tiles an embed with no data-tiles shows, in order. */
+export const DEFAULT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours"] as const;
+/** The tiles /report shows, in order: the defaults with the all-time install count beside the 30-day one. */
+export const REPORT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "installsAllTime", "usageHours"] as const;
 /** Chart names, in default order. Selectable with data-charts or options.charts. */
 export const CHART_NAMES = ["actives", "concurrent", "usageHours", "versions"] as const;
 
@@ -23,7 +31,8 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
 (function (root) {
   "use strict";
 
-  var TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours"];
+  var TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime"];
+  var DEFAULT_TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours"];
   var CHARTS = ["actives", "concurrent", "usageHours", "versions"];
   var OPT_IN_LABEL = "Opted-in installs only: a lower bound, not total users.";
   var USAGE_LABEL = "estimated, opted-in installs only, 10-minute resolution";
@@ -40,7 +49,8 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     dailyActive: "Daily active",
     weeklyActive: "Weekly active",
     uniqueUsers30d: "Unique installs, 30 days",
-    usageHours: "Usage hours, last 7 complete UTC days"
+    usageHours: "Usage hours, last 7 complete UTC days",
+    installsAllTime: "Total installs (all time)"
   };
   var CHART_TITLES = {
     actives: "Daily and weekly active installs",
@@ -55,9 +65,12 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     });
   }
 
-  /** "all" / undefined -> every name; "none" or "" -> none; else the known names given, in the order given. */
-  function select(value, all) {
-    if (value === undefined || value === null) return all.slice();
+  /**
+   * undefined -> the defaults (every name when none are given); "all" -> every
+   * name; "none" or "" -> none; else the known names given, in the order given.
+   */
+  function select(value, all, defaults) {
+    if (value === undefined || value === null) return (defaults || all).slice();
     var list = typeof value === "string" ? value.split(/[\s,]+/) : value;
     var out = [];
     for (var i = 0; i < list.length; i++) {
@@ -127,6 +140,8 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
       } else if (name === "dailyActive") value = m.dailyActive;
       else if (name === "weeklyActive") value = m.weeklyActive;
       else if (name === "uniqueUsers30d") value = m.uniqueUsers30d;
+      // A snapshot written before installsAllTime existed has no figure, so it reads "collecting data".
+      else if (name === "installsAllTime") value = m.installsAllTime;
       else if (name === "usageHours" && m.usageHours) {
         var u = m.usageHours;
         value = u.last7d;
@@ -324,7 +339,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
    */
   function render(m, h, options, loading) {
     options = options || {};
-    var tiles = select(options.tiles, TILES);
+    var tiles = select(options.tiles, TILES, DEFAULT_TILES);
     var charts = select(options.charts, CHARTS);
     var html = '<div class="eqbt" data-eqbt-version="1"><p class="eqbt-optin">' + esc(OPT_IN_LABEL) + "</p>";
     if (tiles.length) {
@@ -426,6 +441,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   root.EQBuddyTelemetry = {
     version: 1,
     TILES: TILES.slice(),
+    DEFAULT_TILES: DEFAULT_TILES.slice(),
     CHARTS: CHARTS.slice(),
     OPT_IN_LABEL: OPT_IN_LABEL,
     USAGE_LABEL: USAGE_LABEL,
@@ -573,7 +589,7 @@ export const REPORT_HTML = `<!doctype html>
 <p class="intro">Public counts from EQBuddy Evolved's opt-in heartbeat. Telemetry is off unless a player turns it on, so every figure is a lower bound.
 Raw figures: <a href="/metrics.json">metrics.json</a> and <a href="/history.json">history.json</a>.
 <a href="https://github.com/DranakCorps-bot/eqbuddy-telemetry">What is collected and how it is counted</a>.</p>
-<div data-eqbuddy-telemetry></div>
+<div data-eqbuddy-telemetry data-tiles="${REPORT_TILE_NAMES.join(" ")}"></div>
 <noscript><p class="intro">The report draws its tiles and charts with JavaScript. The same figures are in metrics.json and history.json above.</p></noscript>
 </main>
 <script src="/widget.js"></script>
