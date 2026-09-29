@@ -115,7 +115,10 @@ A test pins every column of every table. Adding one fails the build.
   "installsAllTime": 212,
   "activeLast24h": 48,
   "activeLast7d": 104,
-  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "activeLast24h": "…", "activeLast7d": "…", "installsAllTime": "…" }
+  "activeAsOf": "2026-10-01T18:00:00Z",
+  "peakDailyActive": 57,
+  "peakWeeklyActive": 118,
+  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "activeLast24h": "…", "activeLast7d": "…", "activeAsOf": "…", "peakDailyActive": "…", "peakWeeklyActive": "…", "installsAllTime": "…" }
 }
 ```
 
@@ -129,8 +132,11 @@ A test pins every column of every table. Adding one fails the build.
 | `weeklyActive` | Distinct ids with a heartbeat in the 7 days up to the end of the last complete UTC day. The same set `versionMix7d` divides, so it always equals `versionMix7d.denominator` | Daily |
 | `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar` | Daily; `todaySoFar` and `allTime` every 10 minutes |
 | `installsAllTime` | **Opted-in installs counted when first seen**, since launch: a lower bound, not total users. Each id adds one the first time it sends a heartbeat that finds no raw row for it. An install silent for more than 90 days, one whose data was deleted, and one that opted out and back in (a new id) each count again if they come back. `/delete` never lowers it | Every 10 minutes |
-| `activeLast24h` | Distinct ids with a heartbeat in the 24 hours up to `generatedAt`. **Rolling**: it includes the current moment, unlike `dailyActive`, which ends at the last complete UTC day | Every 10 minutes |
-| `activeLast7d` | Distinct ids with a heartbeat in the 7 days up to `generatedAt`. **Rolling**: it includes the current moment, unlike `weeklyActive`, which ends at the last complete UTC day | Every 10 minutes |
+| `activeLast24h` | Distinct ids with a heartbeat in the 24 hours up to `activeAsOf`. **Rolling**: it includes today, unlike `dailyActive`, which ends at the last complete UTC day | Hourly |
+| `activeLast7d` | Distinct ids with a heartbeat in the 7 days up to `activeAsOf`. **Rolling**: it includes today, unlike `weeklyActive`, which ends at the last complete UTC day | Hourly |
+| `activeAsOf` | When `activeLast24h`, `activeLast7d` and today's part of `peakDailyActive` were last counted: less than an hour before `generatedAt`. The passes in between repeat that count | Hourly |
+| `peakDailyActive` | The most distinct ids in any single UTC day since launch, **today included**: the largest of every complete day's `dailyActive` and the distinct ids seen since 00:00 UTC today (as of `activeAsOf`) | Hourly for today; daily for the days before |
+| `peakWeeklyActive` | The most distinct ids in any 7-day window ending on a UTC day since launch, **today included**: the largest of every complete day's `weeklyActive` and `activeLast7d` | Hourly for the rolling week; daily for the days before |
 
 **Usage hours are computed on the server only**, from the id-free
 `bucket_count` table. The heartbeat payload did not change. The rollup writes
@@ -160,10 +166,21 @@ in the pass. Until the first UTC day completes, all four read zero.
 **The rolling actives are the deliberate exception.** On launch day
 (2026-09-28) `/report` showed *Daily active 0* beside *Concurrent now 10*: both
 true, but a headline that leaves out the day it is read on reads as wrong.
-`activeLast24h` and `activeLast7d` are live scans of the raw table on every
-pass, so they include today. They sit beside `dailyActive` and `weeklyActive`,
-which keep their meaning, and the history chart still draws the per-day
-rollups. What the two scans cost is under Known limits.
+`activeLast24h`, `activeLast7d` and today's part of `peakDailyActive` are
+live scans of the raw table, so they include today. They sit beside
+`dailyActive` and `weeklyActive`, which keep their meaning, and the history
+chart still draws the per-day rollups. They are still bound by the reasoning
+above, which is why they run **once an hour**, not every pass. Each pass first
+reads the snapshot it is about to replace (one query, one row). If that
+snapshot's `activeAsOf` is less than an hour old, the pass publishes its
+figures and `activeAsOf` again and skips the three scans. When no snapshot is
+readable, or it is older or from before these fields, the pass scans. The
+reuse needs no new table and no migration: it lives in the existing
+`metrics_snapshot` row. The peaks' per-day half comes from the rollup rows the
+pass already reads for the history, so it costs no query, and a peak outlives
+the 90-day purge of the raw rows. A reused `peakDailyActive` is a floor, never
+a ceiling, because it was itself an observed day. The costs are under Known
+limits.
 
 **The all-time install count keeps no install id.** It is one integer in
 `all_time_total`. A heartbeat whose id has no row in `heartbeat` adds one to it
@@ -268,8 +285,10 @@ script loads.
 |---|---|
 | `concurrentNow` | `concurrentNow` |
 | `peakConcurrent` | `peakConcurrent`, with its bucket's time in America/Chicago |
-| `activeLast24h` | `activeLast24h`, labelled *Active, last 24 hours*, with the note that it is rolling and includes today. Over a snapshot published before the field existed it shows `dailyActive` under that tile's own label and definition |
+| `activeLast24h` | `activeLast24h`, labelled *Active, last 24 hours*, with *Counted* and `activeAsOf` in America/Chicago beneath and the note that it is rolling, counted hourly and includes today. Over a snapshot published before the field existed it shows `dailyActive` under that tile's own label and definition |
 | `activeLast7d` | `activeLast7d`, labelled *Active, last 7 days*, the same way. Falls back to `weeklyActive` likewise |
+| `peakDailyActive` | `peakDailyActive`, labelled *Peak daily users*. **Not a default.** `/report` shows it, beside `activeLast24h` |
+| `peakWeeklyActive` | `peakWeeklyActive`, labelled *Peak weekly active*. **Not a default.** `/report` shows it, beside `activeLast7d` |
 | `uniqueUsers30d` | `uniqueUsers30d` |
 | `usageHoursAllTime` | `usageHours.allTime`, labelled *Usage hours (all time)*, with *Today so far X h · last 7 full days Y · last 30 full days Z* beneath. Before the first complete UTC day the full-day figures are left out rather than shown as 0 |
 | `installsAllTime` | `installsAllTime`, labelled *Total installs (all time)*. **Not a default:** name it (or `all`) to show it. `/report` shows it, beside `uniqueUsers30d` |
@@ -284,7 +303,8 @@ headlines all end at the last complete UTC day and so left out the day they
 were read on. The old names were kept, not repurposed: an embed that names
 them still gets exactly the figure it got before (only the two active tiles'
 labels now name their window). An embed that names no tiles picks up the new
-defaults. `all` now renders all ten tiles, the new three last.
+defaults. `all` now renders all twelve tiles, the new ones last. A peak tile
+over a snapshot from before the peaks reads *collecting data*, never 0.
 
 | Chart | Shows |
 |---|---|
@@ -358,17 +378,34 @@ is written down here so the rule can be checked.
   row, then the upsert); the count's row is written only on an install's first
   heartbeat. Workers Free also allows only 50 D1 queries per
   invocation, so after a cron outage the daily rollup catches up at most 7
-  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass is at most 42 queries
-  (`MAX_D1_QUERIES_PER_PASS`, pinned by a test; 40 before the rolling
-  actives) and the backlog drains over the next passes.
-- **The rolling actives read the most rows.** `activeLast24h` and
-  `activeLast7d` scan every raw row in their window on every 10-minute pass.
-  A raw row is one install in one 10-minute bucket, so with an average of N
-  opted-in installs online the two scans read about 1,152 × N rows a pass, or
-  about 166,000 × N a day. **Estimate, not a measurement:** at an average of
-  10 online that is about a third of the free 5 million rows read a day, and
-  at about 30 it is all of it. If that bites, the 7-day scan is the one to
-  move off the 10-minute cadence (it is seven eighths of the cost).
+  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`). A pass is at most 44 queries
+  (`MAX_D1_QUERIES_PER_PASS`, pinned exactly by a test). It was 40 before the
+  rolling actives and the peaks: they add the previous-snapshot read and the
+  three hourly scans, and a pass that reuses the scans is 3 fewer. The backlog
+  drains over the next passes.
+- **The live scans read the most rows, so they run hourly.** A raw row is one
+  install in one 10-minute bucket, and a scan reads every row in its window.
+  Measured against a local D1 (`meta.rows_read`, installs online around the
+  clock), each online install cost 1,008 rows for the 7-day scan, 144 for the
+  24-hour one, 73 for today at noon (about 72 averaged over a day) and 1 for
+  `concurrentNow`. Run every 10-minute pass, the three scans would read about
+  176,000 × N rows a day, for an average of N opted-in installs online. Run
+  hourly, they read about 29,000 × N. With everything else in a day's passes
+  (the daily rollup about 5,500 × N, heartbeats about 900 × N, `concurrentNow`,
+  bucket closing and the purge about 500 × N, and about 160,000 rows that do not depend on N:
+  mostly the history's week of `bucket_count`), **estimated** rows read per
+  day against the free 5 million:
+
+  | Average online (N) | Before the rolling figures | Every 10 minutes | Hourly (shipped) |
+  |---|---|---|---|
+  | 10 | about 0.23 M | about 2.0 M | about 0.52 M |
+  | 30 | about 0.37 M | about 5.7 M (over) | about 1.25 M |
+  | 100 | about 0.84 M | about 18.5 M (over) | about 3.8 M |
+
+  The hourly design stays inside the free tier up to an average of about 130
+  installs online. The next lever is the hourly 7-day scan: it is five sixths
+  of what is left of the scans. The refresh interval is one constant,
+  `ACTIVE_REFRESH_MS`.
 - **No licence has been chosen yet.** The code is public so it can be read and
   checked. Choosing a licence is the project owner's decision.
 
@@ -394,8 +431,8 @@ fixtures with known answers:
 - `test/widget/widget.test.ts`: the served `widget.js`, run in Node against a
   stub DOM. Covers every tile and chart, subset selection, the opt-in and usage
   labels, the collecting-data states, escaping, mounting and auto-mounting,
-  the rolling-active and all-time-usage tiles with their fallback over an
-  older snapshot, and the old tile names keeping their figures.
+  the rolling-active, peak and all-time-usage tiles with their fallbacks over
+  an older snapshot, and the old tile names keeping their figures.
 - `test/worker/installs.test.ts`: the all-time install count: first seen adds
   one; repeat, rate-limited and refused heartbeats add nothing; a same-moment
   race counts once; `/delete` and the purge never lower it; a return after 90
@@ -403,8 +440,11 @@ fixtures with known answers:
   a seeded raw table; and the `metrics.json` field and its definition.
 - `test/worker/rollup.test.ts`: bucket closing, all six public numbers, the
   rolling `activeLast24h`/`activeLast7d` against the complete-day figures,
-  window edges to the millisecond, daily catch-up, the per-pass query count
-  (exactly `MAX_D1_QUERIES_PER_PASS` in the worst case), the 90-day purge boundary,
+  the peaks (launch day, an earlier busier day, the rolling week, UTC day not
+  24 hours), the hourly scan and the reuse between (which snapshot may stand
+  in, and that a reused peak is only a floor), window edges to the
+  millisecond, daily catch-up, the per-pass query count (exactly
+  `MAX_D1_QUERIES_PER_PASS` in the worst case, 3 fewer when reusing), the 90-day purge boundary,
   aggregates that outlive the purge, the `metrics.json` shape and headers, and
   the storage-shape pin.
 - `test/static/guards.test.ts`: no address read, no logging, platform logging

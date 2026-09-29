@@ -23,15 +23,23 @@
  * weeklyActive and usageHours, which still show the complete-UTC-day figures
  * they always did. The default and report lists switched to the new names,
  * because on launch day the old headlines left out the day they were read on.
+ * The two peak tiles (peakDailyActive, peakWeeklyActive) are optional, like
+ * installsAllTime: not defaults, but on /report.
  */
 export const TILE_NAMES = [
   "concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime",
-  "activeLast24h", "activeLast7d", "usageHoursAllTime",
+  "activeLast24h", "activeLast7d", "usageHoursAllTime", "peakDailyActive", "peakWeeklyActive",
 ] as const;
 /** The tiles an embed with no data-tiles shows, in order. */
 export const DEFAULT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "usageHoursAllTime"] as const;
-/** The tiles /report shows, in order: the defaults with the all-time install count beside the 30-day one. */
-export const REPORT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "installsAllTime", "usageHoursAllTime"] as const;
+/**
+ * The tiles /report shows, in order: the defaults, each peak beside the rolling
+ * figure it can never be below, and the all-time install count beside the 30-day one.
+ */
+export const REPORT_TILE_NAMES = [
+  "concurrentNow", "peakConcurrent", "activeLast24h", "peakDailyActive", "activeLast7d", "peakWeeklyActive",
+  "uniqueUsers30d", "installsAllTime", "usageHoursAllTime",
+] as const;
 /** Chart names, in default order. Selectable with data-charts or options.charts. */
 export const CHART_NAMES = ["actives", "concurrent", "usageHours", "versions"] as const;
 
@@ -41,7 +49,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   "use strict";
 
   var TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime",
-    "activeLast24h", "activeLast7d", "usageHoursAllTime"];
+    "activeLast24h", "activeLast7d", "usageHoursAllTime", "peakDailyActive", "peakWeeklyActive"];
   var DEFAULT_TILES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "usageHoursAllTime"];
   var CHARTS = ["actives", "concurrent", "usageHours", "versions"];
   var OPT_IN_LABEL = "Opted-in installs only: a lower bound, not total users.";
@@ -64,11 +72,15 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     installsAllTime: "Total installs (all time)",
     activeLast24h: "Active, last 24 hours",
     activeLast7d: "Active, last 7 days",
-    usageHoursAllTime: "Usage hours (all time)"
+    usageHoursAllTime: "Usage hours (all time)",
+    peakDailyActive: "Peak daily users",
+    peakWeeklyActive: "Peak weekly active"
   };
   var TILE_NOTES = {
-    activeLast24h: "Rolling: the 24 hours up to this update, today included.",
-    activeLast7d: "Rolling: the 7 days up to this update, today included."
+    activeLast24h: "Rolling: the 24 hours up to the last hourly count, today included.",
+    activeLast7d: "Rolling: the 7 days up to the last hourly count, today included.",
+    peakDailyActive: "The busiest single UTC day since launch, today so far included (counted hourly).",
+    peakWeeklyActive: "The busiest 7 days since launch, the last 7 days included (counted hourly)."
   };
   /**
    * A rolling tile over a snapshot published before its field existed shows the
@@ -163,6 +175,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
       if (m && typeof m[name] === "number") {
         value = m[name];
         extraNote = TILE_NOTES[name];
+        if (m.activeAsOf) sub = "Counted " + chicago(m.activeAsOf);
       } else if (m) {
         defKey = ROLLING_FALLBACK[name];
         label = TILE_LABELS[defKey];
@@ -192,7 +205,11 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
       else if (name === "uniqueUsers30d") value = m.uniqueUsers30d;
       // A snapshot written before installsAllTime existed has no figure, so it reads "collecting data".
       else if (name === "installsAllTime") value = m.installsAllTime;
-      else if (name === "usageHours" && m.usageHours) {
+      // Likewise the peaks: an older snapshot has no figure and reads "collecting data".
+      else if (name === "peakDailyActive" || name === "peakWeeklyActive") {
+        value = m[name];
+        if (typeof value === "number") extraNote = TILE_NOTES[name];
+      } else if (name === "usageHours" && m.usageHours) {
         var u = m.usageHours;
         value = u.last7d;
         fmt = hours;
