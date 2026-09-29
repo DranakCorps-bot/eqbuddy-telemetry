@@ -57,9 +57,15 @@ const METRICS = {
   weeklyActive: 96,
   usageHours: { yesterday: 12.5, last7d: 80, last30d: 300.25, allTime: 1238, todaySoFar: 3.5 },
   installsAllTime: 1512,
+  activeLast24h: 55,
+  activeLast7d: 120,
   definitions: {
     dailyActive: "Distinct opted-in installs that sent a heartbeat in the last complete UTC day.",
+    weeklyActive: "Distinct opted-in installs in the 7 days up to the end of the last complete UTC day.",
     installsAllTime: "Opted-in installs counted when first seen.",
+    usageHours: "Estimated hours of use by opted-in installs only.",
+    activeLast24h: "Distinct opted-in installs in the 24 hours up to generatedAt. A rolling window.",
+    activeLast7d: "Distinct opted-in installs in the 7 days up to generatedAt. A rolling window.",
   },
 };
 
@@ -88,6 +94,8 @@ const EMPTY_METRICS = {
   weeklyActive: 0,
   usageHours: { yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0 },
   installsAllTime: 0,
+  activeLast24h: 0,
+  activeLast7d: 0,
 };
 const EMPTY_HISTORY = { ...HISTORY, days: [], concurrent10m: [] };
 
@@ -143,13 +151,19 @@ describe("rendering", () => {
 
   it("shows the figures, the peak's time in America/Chicago, and the server's definitions", () => {
     const html = load().render(METRICS, HISTORY);
-    expect(html).toContain(">41<");
+    expect(html).toContain(">55<"); // active, last 24 hours
     expect(html).toContain(">140<");
     expect(html).toContain("10 minutes from Sep 27, 9:10 PM CDT");
-    expect(html).toContain(">80<"); // usage hours, last 7 days
-    expect(html).toContain("Today so far 3.5 h · Yesterday 12.5 · 30 days 300 · all time 1,238");
-    expect(html).toContain(METRICS.definitions.dailyActive);
+    expect(html).toContain(">1,238<"); // usage hours, all time
+    expect(html).toContain("Today so far 3.5 h · last 7 full days 80 · last 30 full days 300");
+    expect(html).toContain(METRICS.definitions.activeLast24h);
     expect(html).toContain("83.3% (80)");
+    // The old tiles still show the old figures when named.
+    const old = load().render(METRICS, HISTORY, { tiles: "dailyActive usageHours", charts: "none" });
+    expect(old).toContain(">41<");
+    expect(old).toContain(">80<"); // usage hours, last 7 complete days
+    expect(old).toContain("Today so far 3.5 h · Yesterday 12.5 · 30 days 300 · all time 1,238");
+    expect(old).toContain(METRICS.definitions.dailyActive);
   });
 
   it("fills the week of 10-minute windows with zeros where nobody was seen", () => {
@@ -206,7 +220,7 @@ describe("empty and thin data", () => {
   it("a non-zero figure before the first complete day is shown as it is", () => {
     const html = load().render({ ...EMPTY_METRICS, concurrentNow: 3 }, EMPTY_HISTORY);
     expect(tileState(html, "concurrentNow")).toBe("ready");
-    expect(tileState(html, "dailyActive")).toBe("collecting");
+    expect(tileState(html, "activeLast24h")).toBe("collecting");
   });
 
   it("one day is too thin for a trend line, but enough for a day's bar", () => {
@@ -252,15 +266,14 @@ describe("empty and thin data", () => {
 });
 
 describe("the all-time installs tile", () => {
-  it("is selectable by name but not a default: an embed that names no tiles renders what it did before", () => {
+  it("is selectable by name but not a default", () => {
     const api = load();
     expect(TILE_NAMES).toContain("installsAllTime");
     expect(DEFAULT_TILE_NAMES).not.toContain("installsAllTime");
     expect(api.select(undefined, api.TILES, api.DEFAULT_TILES)).toEqual([...DEFAULT_TILE_NAMES]);
     expect(api.select("all", api.TILES, api.DEFAULT_TILES)).toEqual([...TILE_NAMES]);
     expect(api.select("installsAllTime", api.TILES, api.DEFAULT_TILES)).toEqual(["installsAllTime"]);
-    // Every default is a known tile, in the known order: the default set is the old list, unchanged.
-    expect(TILE_NAMES.filter((n) => (DEFAULT_TILE_NAMES as readonly string[]).includes(n))).toEqual([...DEFAULT_TILE_NAMES]);
+    for (const name of DEFAULT_TILE_NAMES) expect(TILE_NAMES, name).toContain(name);
     expect(attrValues(api.render(METRICS, HISTORY), "data-tile")).not.toContain("installsAllTime");
   });
 
@@ -288,8 +301,119 @@ describe("the all-time installs tile", () => {
   });
 
   it("the report's tile list is every default plus installsAllTime, beside the 30-day count", () => {
-    expect([...REPORT_TILE_NAMES].sort()).toEqual([...TILE_NAMES].sort());
+    expect([...REPORT_TILE_NAMES].sort()).toEqual([...DEFAULT_TILE_NAMES, "installsAllTime"].sort());
     expect(REPORT_TILE_NAMES.indexOf("installsAllTime")).toBe(REPORT_TILE_NAMES.indexOf("uniqueUsers30d") + 1);
+  });
+});
+
+describe("rolling actives and the all-time usage headline (launch day, 2026-09-28)", () => {
+  // What /report read on launch day: 10 concurrent, a complete-day daily active
+  // of 0, and a 7-day usage headline (3.2) smaller than today alone (11).
+  const LAUNCH = {
+    ...METRICS,
+    concurrentNow: 10,
+    dailyActive: 0,
+    weeklyActive: 4,
+    usageHours: { yesterday: 1.5, last7d: 3.2, last30d: 3.2, allTime: 14.2, todaySoFar: 11 },
+    activeLast24h: 12,
+    activeLast7d: 14,
+  };
+  const LAUNCH_HISTORY = { ...HISTORY, days: HISTORY.days.slice(1) };
+
+  /** One tile's markup, from its opening tag to the next tile's (or the end of the tile grid). */
+  function tileHtml(html: string, name: string): string {
+    const start = html.indexOf(`<div class="eqbt-tile" data-tile="${name}"`);
+    expect(start, name).toBeGreaterThanOrEqual(0);
+    const next = html.indexOf('<div class="eqbt-tile" data-tile="', start + 1);
+    return html.slice(start, next < 0 ? undefined : next);
+  }
+
+  it("the default and report tiles lead with the rolling actives and all-time usage, not the complete-day figures", () => {
+    expect(DEFAULT_TILE_NAMES).toEqual(["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "usageHoursAllTime"]);
+    for (const old of ["dailyActive", "weeklyActive", "usageHours"]) {
+      expect(DEFAULT_TILE_NAMES as readonly string[], old).not.toContain(old);
+      expect(REPORT_TILE_NAMES as readonly string[], old).not.toContain(old);
+      // Still a tile: an embed that names it keeps getting it.
+      expect(TILE_NAMES as readonly string[], old).toContain(old);
+    }
+    // Names are only ever appended: the list up to installsAllTime is the old one, in its old order.
+    expect(TILE_NAMES.slice(0, 7)).toEqual(["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime"]);
+  });
+
+  it("the usage headline is all time, and the sub-line is today, 7 full days and 30 full days", () => {
+    const api = load() as Api & { USAGE_WINDOW_ALL: string };
+    const html = api.render(LAUNCH, LAUNCH_HISTORY, { tiles: "usageHoursAllTime", charts: "none" });
+    expect(tileState(html, "usageHoursAllTime")).toBe("ready");
+    expect(html).toContain('<div class="eqbt-tile-label">Usage hours (all time)</div>');
+    expect(html).toContain('<div class="eqbt-tile-value">14.2</div>');
+    expect(html).not.toContain('<div class="eqbt-tile-value">3.2</div>');
+    expect(html).toContain('<div class="eqbt-tile-sub">Today so far 11 h · last 7 full days 3.2 · last 30 full days 3.2</div>');
+    expect(api.USAGE_WINDOW_ALL).toMatch(/All time and today so far include today/);
+    expect(api.USAGE_WINDOW_ALL).toMatch(/Full days are complete UTC days, so today is not in them/);
+    expect(html).toContain("estimated, opted-in installs only, 10-minute resolution. " + api.USAGE_WINDOW_ALL);
+    expect(html).toContain(METRICS.definitions.usageHours);
+  });
+
+  it("before the first complete UTC day the usage sub-line is today alone, never a 0 for a full day", () => {
+    const early = { ...EMPTY_METRICS, usageHours: { ...EMPTY_METRICS.usageHours, allTime: 1.83, todaySoFar: 1.83 } };
+    const html = load().render(early, EMPTY_HISTORY, { tiles: "usageHoursAllTime", charts: "none" });
+    expect(tileState(html, "usageHoursAllTime")).toBe("ready");
+    expect(html).toContain('<div class="eqbt-tile-sub">Today so far 1.8 h</div>');
+    const zero = load().render(EMPTY_METRICS, EMPTY_HISTORY, { tiles: "usageHoursAllTime", charts: "none" });
+    expect(tileState(zero, "usageHoursAllTime")).toBe("collecting");
+    expect(zero).not.toContain("eqbt-tile-sub");
+  });
+
+  it("the rolling tiles show activeLast24h and activeLast7d, each labelled with its window and a one-line note", () => {
+    const html = load().render(LAUNCH, LAUNCH_HISTORY, { tiles: "activeLast24h activeLast7d", charts: "none" });
+    const day = tileHtml(html, "activeLast24h");
+    expect(day).toContain('data-state="ready"');
+    expect(day).toContain('<div class="eqbt-tile-label">Active, last 24 hours</div>');
+    expect(day).toContain('<div class="eqbt-tile-value">12</div>');
+    expect(day).toContain('<div class="eqbt-tile-note">Rolling: the 24 hours up to this update, today included.</div>');
+    expect(day).toContain(METRICS.definitions.activeLast24h);
+    const week = tileHtml(html, "activeLast7d");
+    expect(week).toContain('<div class="eqbt-tile-label">Active, last 7 days</div>');
+    expect(week).toContain('<div class="eqbt-tile-value">14</div>');
+    expect(week).toContain('<div class="eqbt-tile-note">Rolling: the 7 days up to this update, today included.</div>');
+    expect(week).toContain(METRICS.definitions.activeLast7d);
+  });
+
+  it("a rolling figure is shown before the first complete UTC day", () => {
+    const html = load().render({ ...EMPTY_METRICS, activeLast24h: 10, activeLast7d: 10 }, EMPTY_HISTORY, { tiles: "activeLast24h activeLast7d", charts: "none" });
+    expect(tileState(html, "activeLast24h")).toBe("ready");
+    expect(tileState(html, "activeLast7d")).toBe("ready");
+  });
+
+  it("a snapshot published before the rolling fields falls back to the complete-day figure, under that figure's own label", () => {
+    const { activeLast24h: _d, activeLast7d: _w, ...old } = LAUNCH;
+    const html = load().render({ ...old, dailyActive: 3 }, LAUNCH_HISTORY, { tiles: "activeLast24h activeLast7d", charts: "none" });
+    const day = tileHtml(html, "activeLast24h");
+    expect(day).toContain('<div class="eqbt-tile-label">Active, last complete UTC day</div>');
+    expect(day).toContain('<div class="eqbt-tile-value">3</div>');
+    expect(day).toContain(METRICS.definitions.dailyActive);
+    expect(day).not.toContain("Rolling");
+    expect(day).not.toContain("Active, last 24 hours");
+    const week = tileHtml(html, "activeLast7d");
+    expect(week).toContain('<div class="eqbt-tile-label">Active, 7 complete UTC days</div>');
+    expect(week).toContain('<div class="eqbt-tile-value">4</div>');
+    expect(week).toContain(METRICS.definitions.weeklyActive);
+  });
+
+  it("the old tile keys keep their figures, now labelled with their complete-UTC-day window", () => {
+    const html = load().render(LAUNCH, LAUNCH_HISTORY, { tiles: "dailyActive weeklyActive usageHours", charts: "none" });
+    expect(tileHtml(html, "dailyActive")).toContain('<div class="eqbt-tile-label">Active, last complete UTC day</div>');
+    expect(tileHtml(html, "weeklyActive")).toContain('<div class="eqbt-tile-label">Active, 7 complete UTC days</div>');
+    expect(tileHtml(html, "weeklyActive")).toContain('<div class="eqbt-tile-value">4</div>');
+    const usage = tileHtml(html, "usageHours");
+    expect(usage).toContain('<div class="eqbt-tile-label">Usage hours, last 7 complete UTC days</div>');
+    expect(usage).toContain('<div class="eqbt-tile-value">3.2</div>');
+  });
+
+  it("the actives chart still draws the per-day rollup fields, not the rolling ones", () => {
+    const html = load().render(LAUNCH, HISTORY, { tiles: "none", charts: "actives" });
+    expect(html).toContain("Oct 2: daily 41, weekly 96");
+    expect(html).not.toContain("daily 12");
   });
 });
 
@@ -335,7 +459,7 @@ describe("mounting into a container", () => {
     const api = load();
     const el = new FakeElement({ "data-base": "https://down.example" });
     await api.mount(el, { fetch: () => Promise.reject(new Error("offline")) });
-    expect(tileState(el.innerHTML, "dailyActive")).toBe("collecting");
+    expect(tileState(el.innerHTML, "activeLast24h")).toBe("collecting");
     expect(el.innerHTML).toContain("Opted-in installs only: a lower bound, not total users.");
   });
 

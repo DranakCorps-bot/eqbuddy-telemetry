@@ -14,6 +14,8 @@ export const CONCURRENT_WINDOW_MS = 10 * MINUTE_MS;
 export const DAILY_ACTIVE_WINDOW_MS = DAY_MS;
 export const UNIQUE_WINDOW_MS = 30 * DAY_MS;
 export const VERSION_WINDOW_MS = 7 * DAY_MS;
+/** metrics.json activeLast7d: the 7 days up to now (activeLast24h reuses DAILY_ACTIVE_WINDOW_MS). */
+export const ROLLING_WEEK_WINDOW_MS = 7 * DAY_MS;
 
 /** ISO-8601 UTC with whole seconds: `2026-10-01T18:40:00Z`. */
 export function iso(ms: number): string {

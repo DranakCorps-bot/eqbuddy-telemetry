@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { handle } from "../../src/index";
 import {
   DEFINITIONS,
+  MAX_D1_QUERIES_PER_PASS,
   MAX_ROLLUP_DAYS_PER_PASS,
+  activeRolling,
   closeBuckets,
   computeMetrics,
   dailyActive,
@@ -190,6 +192,73 @@ describe("rollup math against a fixture with known answers", () => {
   });
 });
 
+describe("rolling actives: activeLast24h and activeLast7d include the current moment", () => {
+  const NOW = Date.parse("2026-10-10T12:00:00Z");
+  const X = A; // 2 hours ago: today
+  const Y = B; // 3 days ago
+  const Z = C; // 8 days ago
+
+  it("a beat 2 hours ago counts in both and in no complete-day figure; 3 days ago only in the 7 days; 8 days ago in neither", async () => {
+    await beat(Z, "2.0.0", NOW - 8 * DAY);
+    await beat(Y, "2.0.0", NOW - 3 * DAY);
+    await beat(X, "2.0.0", NOW - 2 * 60 * MIN);
+    // The backlog reaches back 9 days: two passes roll every complete day up.
+    await runScheduled(env.DB, NOW - 10 * MIN);
+    await runScheduled(env.DB, NOW);
+    const m = await computeMetrics(env.DB, NOW);
+
+    expect(m.activeLast24h).toBe(1); // X
+    expect(m.activeLast7d).toBe(2); // X, Y
+    // The complete-day figures end at Oct 9's end, before X's beat.
+    expect(m.dailyActive).toBe(0);
+    expect(m.weeklyActive).toBe(1); // Y; Z is 8 days back, outside Oct 3..Oct 9
+    expect(m.uniqueUsers30d).toBe(2); // Y, Z
+    // The cron's snapshot publishes the same.
+    const snap = await env.DB.prepare("SELECT body FROM metrics_snapshot WHERE id = 1").first<{ body: string }>();
+    expect(JSON.parse(snap!.body)).toMatchObject({ activeLast24h: 1, activeLast7d: 2, dailyActive: 0, weeklyActive: 1 });
+  });
+
+  it("the edges are exact: 24 hours and 7 days back are outside, one ms later is inside, after now is not yet seen", async () => {
+    await beat(A, "2.0.0", NOW - DAY); // exactly 24 hours: outside the day, inside the week
+    await beat(B, "2.0.0", NOW - DAY + 1); // inside both
+    await beat(C, "2.0.0", NOW - 7 * DAY); // exactly 7 days: outside both
+    await beat(D, "2.0.0", NOW - 7 * DAY + 1); // inside the week only
+    await beat(E, "2.0.0", NOW + 1); // after now: in neither
+    expect(await activeRolling(env.DB, NOW)).toEqual({ last24h: 1, last7d: 3 });
+  });
+
+  it("costs two queries per pass, both bounded to their window", async () => {
+    const sql: string[] = [];
+    const recorded = new Proxy(env.DB, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop === "prepare") {
+          return (q: string) => {
+            sql.push(q);
+            return target.prepare(q);
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await activeRolling(recorded, NOW);
+    expect(sql).toHaveLength(2);
+    for (const q of sql) expect(q).toMatch(/last_seen_ms > \?1 AND last_seen_ms <= \?2 AND bucket_start >= \?3/);
+  });
+
+  it("defines both as rolling windows that include the current moment, unlike dailyActive and weeklyActive", () => {
+    for (const key of ["activeLast24h", "activeLast7d"] as const) {
+      expect(DEFINITIONS[key], key).toMatch(/up to generatedAt/);
+      expect(DEFINITIONS[key], key).toMatch(/rolling window that includes the current moment/);
+      expect(DEFINITIONS[key], key).toMatch(/ends at the last complete UTC day/);
+    }
+    expect(DEFINITIONS.activeLast24h).toMatch(/24 hours/);
+    expect(DEFINITIONS.activeLast24h).toMatch(/unlike dailyActive/);
+    expect(DEFINITIONS.activeLast7d).toMatch(/7 days/);
+    expect(DEFINITIONS.activeLast7d).toMatch(/unlike weeklyActive/);
+  });
+});
+
 describe("daily rollups", () => {
   const DAY1 = Date.parse("2026-10-01T00:00:00Z");
 
@@ -263,7 +332,9 @@ describe("daily rollups", () => {
 
     const back = DAY1 + 41 * DAY + 5 * MIN; // first pass of Nov 11th: Oct 2..Nov 10 are missing
     await runScheduled(counted, back);
-    expect(queries).toBeLessThan(50);
+    expect(queries).toBeLessThanOrEqual(MAX_D1_QUERIES_PER_PASS);
+    // A rollup already exists, so the first-heartbeat read is skipped: one under the worst case.
+    expect(queries).toBe(MAX_D1_QUERIES_PER_PASS - 1);
     expect((await daily()).length).toBe(1 + MAX_ROLLUP_DAYS_PER_PASS);
     // The pass got past the rollup: the snapshot was written.
     const snap = await env.DB.prepare("SELECT generated_at FROM metrics_snapshot WHERE id = 1").first<{ generated_at: string }>();
@@ -275,6 +346,30 @@ describe("daily rollups", () => {
     const days = (await daily()).map((r) => r.day);
     expect(days.length).toBe(41); // Oct 1 .. Nov 10, no gap
     expect(days[days.length - 1]).toBe("2026-11-10");
+  });
+
+  it("the worst-case pass is exactly MAX_D1_QUERIES_PER_PASS, 42, under the free tier's 50", async () => {
+    // No rollup has ever been written and the first heartbeat is ten days back:
+    // both starting reads run and a full MAX_ROLLUP_DAYS_PER_PASS days roll up.
+    await beat(A, "2.0.0", DAY1 - 10 * DAY + 60 * MIN);
+    let queries = 0;
+    const counted = new Proxy(env.DB, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop === "prepare") {
+          return (sql: string) => {
+            queries++;
+            return target.prepare(sql);
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await runScheduled(counted, DAY1 + 5 * MIN);
+    expect((await daily()).length).toBe(MAX_ROLLUP_DAYS_PER_PASS);
+    expect(MAX_D1_QUERIES_PER_PASS).toBe(42);
+    expect(queries).toBe(MAX_D1_QUERIES_PER_PASS);
+    expect(MAX_D1_QUERIES_PER_PASS).toBeLessThan(50);
   });
 
   it("writes nothing when there has never been a heartbeat", async () => {
@@ -345,6 +440,8 @@ describe("GET /metrics.json", () => {
       "weeklyActive",
       "usageHours",
       "installsAllTime",
+      "activeLast24h",
+      "activeLast7d",
       "definitions",
     ]);
     expect(body).toMatchObject({
@@ -359,6 +456,9 @@ describe("GET /metrics.json", () => {
       weeklyActive: 0,
       // A, B, C, D and E each counted once, when first seen; D's later beat is not in the snapshot yet and is not new anyway.
       installsAllTime: 5,
+      // Rolling, up to the snapshot's 12:15: A, B and C beat today. D is 20 days old, E 40.
+      activeLast24h: 3,
+      activeLast7d: 3,
     });
     expect(body.definitions).toEqual(DEFINITIONS);
     expect(JSON.stringify(body)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/); // no install id leaks into the public file

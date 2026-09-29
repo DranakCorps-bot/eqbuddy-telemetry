@@ -15,14 +15,23 @@
 
 /**
  * Every tile name, selectable with data-tiles or options.tiles; "all" is this list.
- * installsAllTime is last and is NOT in the default set below, so an embed that
- * names no tiles renders exactly what it rendered before the tile existed.
+ * Names are only ever appended, and a name never changes what it shows: an embed
+ * that names a tile keeps getting that figure.
+ *
+ * The rolling tiles (activeLast24h, activeLast7d) and the all-time usage tile
+ * (usageHoursAllTime) were ADDED rather than repurposing dailyActive,
+ * weeklyActive and usageHours, which still show the complete-UTC-day figures
+ * they always did. The default and report lists switched to the new names,
+ * because on launch day the old headlines left out the day they were read on.
  */
-export const TILE_NAMES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime"] as const;
+export const TILE_NAMES = [
+  "concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime",
+  "activeLast24h", "activeLast7d", "usageHoursAllTime",
+] as const;
 /** The tiles an embed with no data-tiles shows, in order. */
-export const DEFAULT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours"] as const;
+export const DEFAULT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "usageHoursAllTime"] as const;
 /** The tiles /report shows, in order: the defaults with the all-time install count beside the 30-day one. */
-export const REPORT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "installsAllTime", "usageHours"] as const;
+export const REPORT_TILE_NAMES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "installsAllTime", "usageHoursAllTime"] as const;
 /** Chart names, in default order. Selectable with data-charts or options.charts. */
 export const CHART_NAMES = ["actives", "concurrent", "usageHours", "versions"] as const;
 
@@ -31,12 +40,14 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
 (function (root) {
   "use strict";
 
-  var TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime"];
-  var DEFAULT_TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours"];
+  var TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime",
+    "activeLast24h", "activeLast7d", "usageHoursAllTime"];
+  var DEFAULT_TILES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "usageHoursAllTime"];
   var CHARTS = ["actives", "concurrent", "usageHours", "versions"];
   var OPT_IN_LABEL = "Opted-in installs only: a lower bound, not total users.";
   var USAGE_LABEL = "estimated, opted-in installs only, 10-minute resolution";
   var USAGE_WINDOW = "7 days, yesterday and 30 days are complete UTC days, so today is not in them. Today so far and all time include today, up to about 20 minutes behind.";
+  var USAGE_WINDOW_ALL = "All time and today so far include today, up to about 20 minutes behind. Full days are complete UTC days, so today is not in them.";
   var COLLECTING = "collecting data";
   var BUCKET_MS = 600000;
   var DAY_MS = 86400000;
@@ -46,12 +57,25 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   var TILE_LABELS = {
     concurrentNow: "Concurrent now",
     peakConcurrent: "Peak concurrent",
-    dailyActive: "Daily active",
-    weeklyActive: "Weekly active",
+    dailyActive: "Active, last complete UTC day",
+    weeklyActive: "Active, 7 complete UTC days",
     uniqueUsers30d: "Unique installs, 30 days",
     usageHours: "Usage hours, last 7 complete UTC days",
-    installsAllTime: "Total installs (all time)"
+    installsAllTime: "Total installs (all time)",
+    activeLast24h: "Active, last 24 hours",
+    activeLast7d: "Active, last 7 days",
+    usageHoursAllTime: "Usage hours (all time)"
   };
+  var TILE_NOTES = {
+    activeLast24h: "Rolling: the 24 hours up to this update, today included.",
+    activeLast7d: "Rolling: the 7 days up to this update, today included."
+  };
+  /**
+   * A rolling tile over a snapshot published before its field existed shows the
+   * complete-UTC-day figure instead, under THAT figure's own label and
+   * definition, so it never claims a window it does not show.
+   */
+  var ROLLING_FALLBACK = { activeLast24h: "dailyActive", activeLast7d: "weeklyActive" };
   var CHART_TITLES = {
     actives: "Daily and weekly active installs",
     concurrent: "Concurrent installs per 10 minutes, last 7 days",
@@ -132,7 +156,33 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     var today = "";
     var extraNote = "";
     var fmt = num;
-    if (m) {
+    // The label and the definition shown: the tile's own, unless a rolling tile fell back.
+    var label = TILE_LABELS[name];
+    var defKey = name;
+    if (ROLLING_FALLBACK[name]) {
+      if (m && typeof m[name] === "number") {
+        value = m[name];
+        extraNote = TILE_NOTES[name];
+      } else if (m) {
+        defKey = ROLLING_FALLBACK[name];
+        label = TILE_LABELS[defKey];
+        value = m[defKey];
+      }
+    } else if (name === "usageHoursAllTime") {
+      if (m && m.usageHours) {
+        var ua = m.usageHours;
+        value = ua.allTime;
+        fmt = hours;
+        var parts = [];
+        // A snapshot written before todaySoFar existed simply has no today figure.
+        if (typeof ua.todaySoFar === "number") parts.push("Today so far " + hours(ua.todaySoFar) + " h");
+        // Before the first complete UTC day the full-day figures are not measured yet, so they are left out rather than shown as 0.
+        if (daysOf(h).length > 0 || ua.last30d > 0) parts.push("last 7 full days " + hours(ua.last7d) + " · last 30 full days " + hours(ua.last30d));
+        sub = parts.join(" · ");
+      }
+      extraNote = USAGE_LABEL + ". " + USAGE_WINDOW_ALL;
+      defKey = "usageHours";
+    } else if (m) {
       if (name === "concurrentNow") value = m.concurrentNow;
       else if (name === "peakConcurrent") {
         value = m.peakConcurrent;
@@ -160,11 +210,11 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     var shown = loading ? '<span class="eqbt-collecting">loading</span>'
       : collecting ? '<span class="eqbt-collecting">' + COLLECTING + "</span>" : esc(fmt(value));
     return '<div class="eqbt-tile" data-tile="' + name + '" data-state="' + state + '">' +
-      '<div class="eqbt-tile-label">' + esc(TILE_LABELS[name]) + "</div>" +
+      '<div class="eqbt-tile-label">' + esc(label) + "</div>" +
       '<div class="eqbt-tile-value">' + shown + "</div>" +
       (sub && (!collecting || today) ? '<div class="eqbt-tile-sub">' + esc(sub) + "</div>" : "") +
       (extraNote ? '<div class="eqbt-tile-note">' + esc(extraNote) + "</div>" : "") +
-      (defs[name] ? '<p class="eqbt-def">' + esc(defs[name]) + "</p>" : "") +
+      (defs[defKey] ? '<p class="eqbt-def">' + esc(defs[defKey]) + "</p>" : "") +
       "</div>";
   }
 
@@ -446,6 +496,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     OPT_IN_LABEL: OPT_IN_LABEL,
     USAGE_LABEL: USAGE_LABEL,
     USAGE_WINDOW: USAGE_WINDOW,
+    USAGE_WINDOW_ALL: USAGE_WINDOW_ALL,
     select: select,
     render: render,
     mount: mount,

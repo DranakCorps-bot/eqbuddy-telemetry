@@ -9,6 +9,7 @@ import {
   DAY_MS,
   RATE_LIMIT_MS,
   RETENTION_DAYS,
+  ROLLING_WEEK_WINDOW_MS,
   UNIQUE_WINDOW_MS,
   VERSION_WINDOW_MS,
   bucketStart,
@@ -176,6 +177,20 @@ export async function uniqueUsers30d(db: D1Database, asOfMs: number): Promise<nu
   return distinctIdsSeen(db, asOfMs - UNIQUE_WINDOW_MS, asOfMs);
 }
 
+/**
+ * Distinct ids seen in the 24 hours and the 7 days up to `now`: ROLLING
+ * windows that include the current moment, unlike dailyActive/weeklyActive,
+ * which end at the last complete UTC day. Two queries on every cron pass, and
+ * each reads every raw row in its window (the README's Known limits carries
+ * the rows-read arithmetic).
+ */
+export async function activeRolling(db: D1Database, nowMs: number): Promise<{ last24h: number; last7d: number }> {
+  return {
+    last24h: await distinctIdsSeen(db, nowMs - DAILY_ACTIVE_WINDOW_MS, nowMs),
+    last7d: await distinctIdsSeen(db, nowMs - ROLLING_WEEK_WINDOW_MS, nowMs),
+  };
+}
+
 export async function concurrentNow(db: D1Database, nowMs: number): Promise<number> {
   return distinctIdsSeen(db, nowMs - CONCURRENT_WINDOW_MS, nowMs);
 }
@@ -196,10 +211,21 @@ export async function peakConcurrent(db: D1Database): Promise<{ count: number; b
  * limits page, read 2026-09-24). Without a cap, catching up after a cron
  * outage of about two weeks would throw before the purge and the snapshot ran.
  * Seven days is 28 queries, so a whole pass (with both snapshots, the
- * today-so-far read and the all-time installs read) is at most 40. The rest of the
- * backlog waits for the next pass, ten minutes later.
+ * today-so-far read, the all-time installs read and the two rolling active
+ * counts) is at most 42 (MAX_D1_QUERIES_PER_PASS). The rest of the backlog
+ * waits for the next pass, ten minutes later.
  */
 export const MAX_ROLLUP_DAYS_PER_PASS = 7;
+
+/**
+ * The most D1 queries one cron pass prepares, and rollup.test.ts pins the worst
+ * case at exactly this: closeBuckets 1; the rollup's two starting reads plus
+ * 4 x MAX_ROLLUP_DAYS_PER_PASS; the purge 1; readRollups 1; the metrics
+ * snapshot 7 (peak, today so far, the two rolling actives, concurrent now,
+ * all-time installs, the write); the history snapshot 2. Workers Free allows 50.
+ * It was 40 before activeLast24h and activeLast7d.
+ */
+export const MAX_D1_QUERIES_PER_PASS = 42;
 
 /**
  * Writes a daily_rollup row for every COMPLETED UTC day that lacks one, from
@@ -328,6 +354,10 @@ export const DEFINITIONS = {
     "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
   usageHours:
     "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar.",
+  activeLast24h:
+    "Distinct opted-in installs that sent a heartbeat in the 24 hours up to generatedAt. A rolling window that includes the current moment, refreshed every 10 minutes, unlike dailyActive, which ends at the last complete UTC day.",
+  activeLast7d:
+    "Distinct opted-in installs that sent a heartbeat in the 7 days up to generatedAt. A rolling window that includes the current moment, refreshed every 10 minutes, unlike weeklyActive, which ends at the last complete UTC day.",
   installsAllTime:
     "Opted-in installs counted when first seen: each adds one the first time it sends a heartbeat. A lower bound, not total users: telemetry is off unless the player turns it on. It is a single running count, so no install id is kept to compute it; the raw heartbeats it is counted from are still deleted after 90 days. An install silent for more than 90 days, or one whose data was deleted, counts again if it comes back, and so does one that opts out and back in (a new id). Deleting an install's data does not lower it.",
 } as const;
@@ -344,6 +374,8 @@ export interface Metrics {
   weeklyActive: number;
   usageHours: UsageHours;
   installsAllTime: number;
+  activeLast24h: number;
+  activeLast7d: number;
   definitions: typeof DEFINITIONS;
 }
 
@@ -354,6 +386,10 @@ export interface Metrics {
  * day for a number that moves slowly. The 1- and 7-day counts follow the same
  * rule for the same reason. Before the first complete day all are zero, which
  * is the truth about a day that has not ended.
+ *
+ * activeLast24h and activeLast7d are the deliberate exception: rolling
+ * windows up to now, scanned live every pass, because a headline that leaves
+ * out the day it is read on reads as wrong (launch day, 2026-09-28).
  *
  * weeklyActive is the 7-day version mix's denominator, not a second query: it
  * is the same distinct set over the same window, and one producer cannot
@@ -372,6 +408,7 @@ export async function computeMetrics(db: D1Database, nowMs: number, rollups?: re
   const peak = await peakConcurrent(db);
   const daily = latestDaily(rows);
   const todayBuckets = await todayInstallBuckets(db, nowMs);
+  const rolling = await activeRolling(db, nowMs);
   return {
     schema: 1,
     generatedAt: iso(nowMs),
@@ -384,6 +421,8 @@ export async function computeMetrics(db: D1Database, nowMs: number, rollups?: re
     weeklyActive: daily.mix.denominator,
     usageHours: usageHoursFrom(rows, todayBuckets),
     installsAllTime: await installsAllTime(db),
+    activeLast24h: rolling.last24h,
+    activeLast7d: rolling.last7d,
     definitions: DEFINITIONS,
   };
 }

@@ -113,7 +113,9 @@ A test pins every column of every table. Adding one fails the build.
   "weeklyActive": 96,
   "usageHours": { "yesterday": 61.5, "last7d": 402.33, "last30d": 1650.17, "allTime": 2214.33, "todaySoFar": 3.5 },
   "installsAllTime": 212,
-  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "installsAllTime": "…" }
+  "activeLast24h": 48,
+  "activeLast7d": 104,
+  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "activeLast24h": "…", "activeLast7d": "…", "installsAllTime": "…" }
 }
 ```
 
@@ -127,6 +129,8 @@ A test pins every column of every table. Adding one fails the build.
 | `weeklyActive` | Distinct ids with a heartbeat in the 7 days up to the end of the last complete UTC day. The same set `versionMix7d` divides, so it always equals `versionMix7d.denominator` | Daily |
 | `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar` | Daily; `todaySoFar` and `allTime` every 10 minutes |
 | `installsAllTime` | **Opted-in installs counted when first seen**, since launch: a lower bound, not total users. Each id adds one the first time it sends a heartbeat that finds no raw row for it. An install silent for more than 90 days, one whose data was deleted, and one that opted out and back in (a new id) each count again if they come back. `/delete` never lowers it | Every 10 minutes |
+| `activeLast24h` | Distinct ids with a heartbeat in the 24 hours up to `generatedAt`. **Rolling**: it includes the current moment, unlike `dailyActive`, which ends at the last complete UTC day | Every 10 minutes |
+| `activeLast7d` | Distinct ids with a heartbeat in the 7 days up to `generatedAt`. **Rolling**: it includes the current moment, unlike `weeklyActive`, which ends at the last complete UTC day | Every 10 minutes |
 
 **Usage hours are computed on the server only**, from the id-free
 `bucket_count` table. The heartbeat payload did not change. The rollup writes
@@ -152,6 +156,14 @@ tier's rows-read allowance 144 times a day on a number that barely moves. The
 1- and 7-day counts follow the same rule: a live 7-day scan every pass would
 cost a quarter of that, and a live 24-hour one would still be the largest read
 in the pass. Until the first UTC day completes, all four read zero.
+
+**The rolling actives are the deliberate exception.** On launch day
+(2026-09-28) `/report` showed *Daily active 0* beside *Concurrent now 10*: both
+true, but a headline that leaves out the day it is read on reads as wrong.
+`activeLast24h` and `activeLast7d` are live scans of the raw table on every
+pass, so they include today. They sit beside `dailyActive` and `weeklyActive`,
+which keep their meaning, and the history chart still draws the per-day
+rollups. What the two scans cost is under Known limits.
 
 **The all-time install count keeps no install id.** It is one integer in
 `all_time_total`. A heartbeat whose id has no row in `heartbeat` adds one to it
@@ -238,7 +250,7 @@ trend needs two days), and so does everything if the JSON cannot be fetched.
 ```html
 <link rel="stylesheet" href="https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev/widget.css">
 <div data-eqbuddy-telemetry
-     data-tiles="dailyActive weeklyActive usageHours"
+     data-tiles="activeLast24h activeLast7d usageHoursAllTime"
      data-charts="usageHours"></div>
 <script src="https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev/widget.js" defer></script>
 ```
@@ -248,7 +260,7 @@ script loads.
 
 | Attribute | Default | Meaning |
 |---|---|---|
-| `data-tiles` | every tile except `installsAllTime` | Tile names, space- or comma-separated, shown in the order given, or `all` (every tile, `installsAllTime` included) or `none` |
+| `data-tiles` | `concurrentNow peakConcurrent activeLast24h activeLast7d uniqueUsers30d usageHoursAllTime` | Tile names, space- or comma-separated, shown in the order given, or `all` (every tile) or `none` |
 | `data-charts` | all | Chart names, the same way |
 | `data-base` | the host `widget.js` came from | Where to fetch `metrics.json` and `history.json` |
 
@@ -256,11 +268,23 @@ script loads.
 |---|---|
 | `concurrentNow` | `concurrentNow` |
 | `peakConcurrent` | `peakConcurrent`, with its bucket's time in America/Chicago |
-| `dailyActive` | `dailyActive` |
-| `weeklyActive` | `weeklyActive` |
+| `activeLast24h` | `activeLast24h`, labelled *Active, last 24 hours*, with the note that it is rolling and includes today. Over a snapshot published before the field existed it shows `dailyActive` under that tile's own label and definition |
+| `activeLast7d` | `activeLast7d`, labelled *Active, last 7 days*, the same way. Falls back to `weeklyActive` likewise |
 | `uniqueUsers30d` | `uniqueUsers30d` |
-| `usageHours` | `usageHours.last7d` (labelled as complete UTC days), with today so far, yesterday, 30 days and all time beneath |
+| `usageHoursAllTime` | `usageHours.allTime`, labelled *Usage hours (all time)*, with *Today so far X h · last 7 full days Y · last 30 full days Z* beneath. Before the first complete UTC day the full-day figures are left out rather than shown as 0 |
 | `installsAllTime` | `installsAllTime`, labelled *Total installs (all time)*. **Not a default:** name it (or `all`) to show it. `/report` shows it, beside `uniqueUsers30d` |
+| `dailyActive` | `dailyActive`, labelled *Active, last complete UTC day*. Not a default since 2026-09-28 |
+| `weeklyActive` | `weeklyActive`, labelled *Active, 7 complete UTC days*. Not a default since 2026-09-28 |
+| `usageHours` | `usageHours.last7d` (labelled as complete UTC days), with today so far, yesterday, 30 days and all time beneath. Not a default since 2026-09-28 |
+
+**Tile names never change meaning.** On 2026-09-28 the defaults and `/report`
+switched from `dailyActive`, `weeklyActive` and `usageHours` to the new
+`activeLast24h`, `activeLast7d` and `usageHoursAllTime`, because the old
+headlines all end at the last complete UTC day and so left out the day they
+were read on. The old names were kept, not repurposed: an embed that names
+them still gets exactly the figure it got before (only the two active tiles'
+labels now name their window). An embed that names no tiles picks up the new
+defaults. `all` now renders all ten tiles, the new three last.
 
 | Chart | Shows |
 |---|---|
@@ -276,7 +300,7 @@ From script, the same options go through the API the widget publishes:
 
 ```js
 EQBuddyTelemetry.mount(document.getElementById("stats"), {
-  tiles: ["dailyActive", "usageHours"], // or "all" / "none"
+  tiles: ["activeLast24h", "usageHoursAllTime"], // or "all" / "none"
   charts: "none",
   base: "https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev",
 });
@@ -334,8 +358,17 @@ is written down here so the rule can be checked.
   row, then the upsert); the count's row is written only on an install's first
   heartbeat. Workers Free also allows only 50 D1 queries per
   invocation, so after a cron outage the daily rollup catches up at most 7
-  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass is at most 40 queries
-  and the backlog drains over the next passes.
+  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`); a pass is at most 42 queries
+  (`MAX_D1_QUERIES_PER_PASS`, pinned by a test; 40 before the rolling
+  actives) and the backlog drains over the next passes.
+- **The rolling actives read the most rows.** `activeLast24h` and
+  `activeLast7d` scan every raw row in their window on every 10-minute pass.
+  A raw row is one install in one 10-minute bucket, so with an average of N
+  opted-in installs online the two scans read about 1,152 × N rows a pass, or
+  about 166,000 × N a day. **Estimate, not a measurement:** at an average of
+  10 online that is about a third of the free 5 million rows read a day, and
+  at about 30 it is all of it. If that bites, the 7-day scan is the one to
+  move off the 10-minute cadence (it is seven eighths of the cost).
 - **No licence has been chosen yet.** The code is public so it can be read and
   checked. Choosing a licence is the project owner's decision.
 
@@ -360,14 +393,18 @@ fixtures with known answers:
   routes, and CORS on the GET routes only.
 - `test/widget/widget.test.ts`: the served `widget.js`, run in Node against a
   stub DOM. Covers every tile and chart, subset selection, the opt-in and usage
-  labels, the collecting-data states, escaping, mounting and auto-mounting.
+  labels, the collecting-data states, escaping, mounting and auto-mounting,
+  the rolling-active and all-time-usage tiles with their fallback over an
+  older snapshot, and the old tile names keeping their figures.
 - `test/worker/installs.test.ts`: the all-time install count: first seen adds
   one; repeat, rate-limited and refused heartbeats add nothing; a same-moment
   race counts once; `/delete` and the purge never lower it; a return after 90
   days or after a delete counts again; migration `0004`'s backfill run against
   a seeded raw table; and the `metrics.json` field and its definition.
-- `test/worker/rollup.test.ts`: bucket closing, all six public numbers, window
-  edges to the millisecond, daily catch-up, the 90-day purge boundary,
+- `test/worker/rollup.test.ts`: bucket closing, all six public numbers, the
+  rolling `activeLast24h`/`activeLast7d` against the complete-day figures,
+  window edges to the millisecond, daily catch-up, the per-pass query count
+  (exactly `MAX_D1_QUERIES_PER_PASS` in the worst case), the 90-day purge boundary,
   aggregates that outlive the purge, the `metrics.json` shape and headers, and
   the storage-shape pin.
 - `test/static/guards.test.ts`: no address read, no logging, platform logging

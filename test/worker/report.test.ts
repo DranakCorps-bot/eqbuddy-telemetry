@@ -170,8 +170,8 @@ describe("usageHours math", () => {
     const bucketReads = sql.filter((q) => /FROM bucket_count WHERE bucket_start >= \?1/.test(q));
     expect(bucketReads).toHaveLength(1);
     expect(bucketReads[0]).not.toMatch(/\bheartbeat\b/);
-    // readRollups, peakConcurrent, todaySoFar, concurrentNow, installsAllTime.
-    expect(sql).toHaveLength(5);
+    // readRollups, peakConcurrent, todaySoFar, the two rolling actives, concurrentNow, installsAllTime.
+    expect(sql).toHaveLength(7);
   });
 
   it("defines todaySoFar, its closed-window rule and its staleness, and says allTime includes today", () => {
@@ -344,9 +344,9 @@ describe("the widget routes", () => {
     expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
     expect(html).toContain('<script src="/widget.js"></script>');
     expect(html).toContain('<link rel="stylesheet" href="/widget.css">');
-    // The report names its tiles: the defaults, with the all-time install count beside the 30-day one.
+    // The report names its tiles: the defaults (rolling actives, all-time usage), with the all-time install count beside the 30-day one.
     expect(html).toContain(
-      '<div data-eqbuddy-telemetry data-tiles="concurrentNow peakConcurrent dailyActive weeklyActive uniqueUsers30d installsAllTime usageHours"></div>',
+      '<div data-eqbuddy-telemetry data-tiles="concurrentNow peakConcurrent activeLast24h activeLast7d uniqueUsers30d installsAllTime usageHoursAllTime"></div>',
     );
     // Only the widget script, and no remote stylesheet, font, image or script.
     expect(html.match(/<script\b/g)).toHaveLength(1);
