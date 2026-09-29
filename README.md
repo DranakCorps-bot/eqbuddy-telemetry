@@ -471,7 +471,16 @@ after the deploy. It only ever raises the figure, so it is safe to repeat:
 npx wrangler d1 execute eqbuddy-telemetry --remote --command "UPDATE all_time_total SET installs_first_seen = MAX(installs_first_seen, (SELECT COUNT(DISTINCT install_id) FROM heartbeat)) WHERE id = 1"
 ```
 
-No secrets are involved. The Worker has no API keys, and the D1 id in
+**One optional secret** (since 2026-09-28): `GITHUB_DISPATCH_TOKEN`. Once an
+hour, on the cron tick in the first ten minutes of the UTC hour and after the
+metrics pass, the Worker asks GitHub to run the EQBuddy repo's `pages.yml`, so the
+landing page's live figures refresh. GitHub's own `schedule` trigger skipped three
+hours in a row on launch day (`src/dispatch.ts`). The request carries nothing but
+`{"ref":"main"}`. The token is a **fine-grained** GitHub token scoped to the one
+repository `DranakCorps-bot/EQBuddy`, with **Actions: Read and write** and nothing
+else. Without the secret the refresh is a silent no-op, and it can never fail the
+metrics pass. Set or rotate it with `npx wrangler secret put GITHUB_DISPATCH_TOKEN`,
+and paste the token at the prompt, never on the command line. The D1 id in
 `wrangler.jsonc` is useless without the account's own credentials. `.dev.vars`
 and `.env*` are ignored anyway, and a test fails if one is ever tracked.
 
