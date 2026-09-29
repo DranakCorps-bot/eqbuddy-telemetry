@@ -3,13 +3,17 @@ import { describe, expect, it } from "vitest";
 import { handle } from "../../src/index";
 import {
   DEFINITIONS,
+  MAX_D1_QUERIES_PER_PASS,
   MAX_ROLLUP_DAYS_PER_PASS,
   closeBuckets,
   computeMetrics,
   dailyActive,
+  peaksFrom,
   purgeExpired,
   recordHeartbeat,
+  reusableActives,
   runScheduled,
+  scanActives,
   uniqueUsers30d,
   versionMix,
   writeDailyRollups,
@@ -28,6 +32,24 @@ const E = "eeeeeeee-0000-4000-8000-000000000005";
 async function beat(installId: string, appVersion: string, at: number): Promise<void> {
   const outcome = await recordHeartbeat(env.DB, { installId, appVersion, os: "Windows 10.0.26200" }, at);
   expect(outcome).toBe("recorded");
+}
+
+/** The database, with every statement it is asked to prepare recorded in order. */
+function recording(): { db: D1Database; sql: string[] } {
+  const sql: string[] = [];
+  const db = new Proxy(env.DB, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop);
+      if (prop === "prepare") {
+        return (q: string) => {
+          sql.push(q);
+          return target.prepare(q);
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { db, sql };
 }
 
 async function bucketCounts(): Promise<Record<string, number>> {
@@ -190,6 +212,213 @@ describe("rollup math against a fixture with known answers", () => {
   });
 });
 
+describe("rolling actives: activeLast24h and activeLast7d include the current moment", () => {
+  const NOW = Date.parse("2026-10-10T12:00:00Z");
+  const X = A; // 2 hours ago: today
+  const Y = B; // 3 days ago
+  const Z = C; // 8 days ago
+
+  it("a beat 2 hours ago counts in both and in no complete-day figure; 3 days ago only in the 7 days; 8 days ago in neither", async () => {
+    await beat(Z, "2.0.0", NOW - 8 * DAY);
+    await beat(Y, "2.0.0", NOW - 3 * DAY);
+    await beat(X, "2.0.0", NOW - 2 * 60 * MIN);
+    // The backlog reaches back 9 days: two passes roll every complete day up.
+    await runScheduled(env.DB, NOW - 10 * MIN);
+    await runScheduled(env.DB, NOW);
+    const m = await computeMetrics(env.DB, NOW);
+
+    expect(m.activeLast24h).toBe(1); // X
+    expect(m.activeLast7d).toBe(2); // X, Y
+    // The complete-day figures end at Oct 9's end, before X's beat.
+    expect(m.dailyActive).toBe(0);
+    expect(m.weeklyActive).toBe(1); // Y; Z is 8 days back, outside Oct 3..Oct 9
+    expect(m.uniqueUsers30d).toBe(2); // Y, Z
+    // The cron's snapshot publishes the same.
+    const snap = await env.DB.prepare("SELECT body FROM metrics_snapshot WHERE id = 1").first<{ body: string }>();
+    expect(JSON.parse(snap!.body)).toMatchObject({ activeLast24h: 1, activeLast7d: 2, dailyActive: 0, weeklyActive: 1 });
+  });
+
+  it("the edges are exact: 24 hours and 7 days back are outside, one ms later is inside, after now is not yet seen", async () => {
+    await beat(A, "2.0.0", NOW - DAY); // exactly 24 hours: outside the day, inside the week
+    await beat(B, "2.0.0", NOW - DAY + 1); // inside both
+    await beat(C, "2.0.0", NOW - 7 * DAY); // exactly 7 days: outside both
+    await beat(D, "2.0.0", NOW - 7 * DAY + 1); // inside the week only
+    await beat(E, "2.0.0", NOW + 1); // after now: in neither
+    // None of them is in today since 00:00 UTC.
+    expect(await scanActives(env.DB, NOW)).toEqual({ activeLast24h: 1, activeLast7d: 3, dailyFloor: 0, asOfMs: NOW });
+  });
+
+  it("today is since 00:00 UTC to the millisecond: a beat AT midnight counts, one ms before does not", async () => {
+    const midnight = Date.parse("2026-10-10T00:00:00Z");
+    await beat(A, "2.0.0", midnight - 1);
+    await beat(B, "2.0.0", midnight);
+    expect((await scanActives(env.DB, NOW)).dailyFloor).toBe(1);
+  });
+
+  it("a live scan costs three queries, each bounded to its window", async () => {
+    const { db, sql } = recording();
+    await scanActives(db, NOW);
+    expect(sql).toHaveLength(3);
+    for (const q of sql) expect(q).toMatch(/last_seen_ms > \?1 AND last_seen_ms <= \?2 AND bucket_start >= \?3/);
+  });
+
+  it("defines both as rolling windows that include today and refresh hourly, unlike dailyActive and weeklyActive", () => {
+    for (const key of ["activeLast24h", "activeLast7d"] as const) {
+      expect(DEFINITIONS[key], key).toMatch(/up to activeAsOf/);
+      expect(DEFINITIONS[key], key).toMatch(/rolling window that includes today/);
+      expect(DEFINITIONS[key], key).toMatch(/ends at the last complete UTC day/);
+      expect(DEFINITIONS[key], key).toMatch(/Refreshed hourly, not every 10 minutes/);
+    }
+    expect(DEFINITIONS.activeLast24h).toMatch(/24 hours/);
+    expect(DEFINITIONS.activeLast24h).toMatch(/unlike dailyActive/);
+    expect(DEFINITIONS.activeLast7d).toMatch(/7 days/);
+    expect(DEFINITIONS.activeLast7d).toMatch(/unlike weeklyActive/);
+    expect(DEFINITIONS.activeAsOf).toMatch(/counted once an hour/);
+  });
+});
+
+describe("peakDailyActive and peakWeeklyActive: the busiest day and week since launch, today included", () => {
+  const NOW = Date.parse("2026-10-10T12:00:00Z");
+  const TODAY = Date.parse("2026-10-10T00:00:00Z");
+
+  /** Runs cron passes, ten minutes apart and ending at `now`, until every complete day is rolled up. */
+  async function catchUp(now: number, passes = 6): Promise<void> {
+    for (let p = passes - 1; p >= 0; p--) await runScheduled(env.DB, now - p * 10 * MIN);
+  }
+
+  it("on launch day, today-only activity sets both peaks", async () => {
+    await beat(A, "2.0.0", TODAY + 60 * MIN);
+    await beat(B, "2.0.0", TODAY + 120 * MIN);
+    await runScheduled(env.DB, NOW);
+    const m = await computeMetrics(env.DB, NOW);
+    expect(m.dailyActive).toBe(0); // no complete day yet
+    expect(m.peakDailyActive).toBe(2);
+    expect(m.peakWeeklyActive).toBe(2);
+    const snap = await env.DB.prepare("SELECT body FROM metrics_snapshot WHERE id = 1").first<{ body: string }>();
+    expect(JSON.parse(snap!.body)).toMatchObject({ peakDailyActive: 2, peakWeeklyActive: 2 });
+  });
+
+  it("an earlier, busier day keeps its peak", async () => {
+    // Sep 20 held A, B and C; today only D.
+    for (const [id, m] of [[A, 60], [B, 120], [C, 180]] as const) await beat(id, "2.0.0", TODAY - 20 * DAY + m * MIN);
+    await beat(D, "2.0.0", TODAY + 60 * MIN);
+    await catchUp(NOW);
+    const m = await computeMetrics(env.DB, NOW);
+    expect(m.activeLast7d).toBe(1); // D: Sep 20 is 20 days back
+    expect(m.peakDailyActive).toBe(3);
+    expect(m.peakWeeklyActive).toBe(3); // Sep 20's 7-day figure, from its rollup
+  });
+
+  it("the rolling 7 days count toward the weekly peak", async () => {
+    await beat(A, "2.0.0", NOW - 3 * DAY); // Oct 7
+    await beat(B, "2.0.0", TODAY + 60 * MIN);
+    await beat(C, "2.0.0", TODAY + 120 * MIN);
+    await catchUp(NOW);
+    const m = await computeMetrics(env.DB, NOW);
+    // Every complete day's 7-day figure is 1 (A); the 7 days up to now hold A, B and C.
+    expect(m.weeklyActive).toBe(1);
+    expect(m.activeLast7d).toBe(3);
+    expect(m.peakWeeklyActive).toBe(3);
+    expect(m.peakDailyActive).toBe(2); // today: B, C
+  });
+
+  it("today is the UTC day since 00:00, not the rolling 24 hours", async () => {
+    await beat(A, "2.0.0", TODAY - 60 * MIN); // yesterday 23:00
+    await beat(B, "2.0.0", TODAY + 60 * MIN); // today 01:00
+    const now = TODAY + 120 * MIN;
+    await catchUp(now);
+    const m = await computeMetrics(env.DB, now);
+    expect(m.activeLast24h).toBe(2);
+    expect(m.peakDailyActive).toBe(1); // yesterday held A, today B: never both in one UTC day
+  });
+
+  it("the per-day half reads the rollup rows already in the pass: peaksFrom is pure", () => {
+    const row = (day: string, active_1d: number, weekly: number) => ({
+      day,
+      unique_30d: 0,
+      version_mix_7d: JSON.stringify({ denominator: weekly, versions: [] }),
+      active_1d,
+      usage_buckets_1d: 0,
+    });
+    const rows = [row("2026-10-01", 5, 9), row("2026-10-02", 2, 7)];
+    expect(peaksFrom(rows, 4, 8)).toEqual({ peakDailyActive: 5, peakWeeklyActive: 9 });
+    expect(peaksFrom(rows, 6, 10)).toEqual({ peakDailyActive: 6, peakWeeklyActive: 10 });
+    expect(peaksFrom([], 0, 0)).toEqual({ peakDailyActive: 0, peakWeeklyActive: 0 });
+  });
+
+  it("defines both, today included, refreshed hourly", () => {
+    expect(DEFINITIONS.peakDailyActive).toMatch(/any single UTC day since launch, today included/);
+    expect(DEFINITIONS.peakDailyActive).toMatch(/since 00:00 UTC today/);
+    expect(DEFINITIONS.peakWeeklyActive).toMatch(/any 7-day window ending on a UTC day since launch, today included/);
+    expect(DEFINITIONS.peakWeeklyActive).toMatch(/activeLast7d/);
+    for (const d of [DEFINITIONS.peakDailyActive, DEFINITIONS.peakWeeklyActive]) expect(d).toMatch(/refreshed hourly/);
+  });
+});
+
+describe("the live scans run at most hourly; the passes between reuse the last snapshot", () => {
+  const H = Date.parse("2026-10-10T12:00:00Z");
+
+  async function snapshot(): Promise<Record<string, unknown>> {
+    const snap = await env.DB.prepare("SELECT body FROM metrics_snapshot WHERE id = 1").first<{ body: string }>();
+    return JSON.parse(snap!.body);
+  }
+
+  /** The heartbeat distinct-count scans a statement list holds: concurrentNow is one, each live scan another. */
+  function heartbeatScans(sql: string[]): number {
+    return sql.filter((q) => /COUNT\(DISTINCT install_id\) AS n FROM heartbeat/.test(q)).length;
+  }
+
+  it("scans at the hour, reuses for the five passes after it, and scans again an hour on", async () => {
+    await beat(A, "2.0.0", H - 5 * MIN);
+    const first = recording();
+    await runScheduled(first.db, H);
+    expect(heartbeatScans(first.sql)).toBe(4); // three live scans + concurrentNow
+    expect(await snapshot()).toMatchObject({ activeLast24h: 1, activeAsOf: "2026-10-10T12:00:00Z", generatedAt: "2026-10-10T12:00:00Z" });
+
+    await beat(B, "2.0.0", H + 5 * MIN);
+    for (let p = 1; p <= 5; p++) {
+      const pass = recording();
+      await runScheduled(pass.db, H + p * 10 * MIN);
+      expect(heartbeatScans(pass.sql), `pass ${p}`).toBe(1); // concurrentNow only
+      const s = await snapshot();
+      // B is not counted yet: the figures and their time are the 12:00 scan's.
+      expect(s, `pass ${p}`).toMatchObject({ activeLast24h: 1, activeLast7d: 1, peakDailyActive: 1, activeAsOf: "2026-10-10T12:00:00Z" });
+      expect(s.generatedAt).toBe(new Date(H + p * 10 * MIN).toISOString().replace(/\.\d{3}Z$/, "Z"));
+    }
+
+    const hourOn = recording();
+    await runScheduled(hourOn.db, H + 60 * MIN);
+    expect(heartbeatScans(hourOn.sql)).toBe(4);
+    expect(await snapshot()).toMatchObject({ activeLast24h: 2, activeLast7d: 2, peakDailyActive: 2, activeAsOf: "2026-10-10T13:00:00Z" });
+  });
+
+  it("reuses a snapshot only when it is under an hour old, not from the future, and carries every field", () => {
+    const body = (fields: Record<string, unknown>) =>
+      JSON.stringify({ activeLast24h: 4, activeLast7d: 9, peakDailyActive: 6, activeAsOf: "2026-10-10T12:00:00Z", ...fields });
+    const reused = { activeLast24h: 4, activeLast7d: 9, dailyFloor: 6, asOfMs: H };
+    expect(reusableActives(body({}), H + 59 * MIN)).toEqual(reused);
+    expect(reusableActives(body({}), H)).toEqual(reused);
+    expect(reusableActives(body({}), H + 60 * MIN)).toBeNull(); // an hour on: scan
+    expect(reusableActives(body({}), H - 1)).toBeNull(); // taken after now: scan
+    expect(reusableActives(body({ activeAsOf: undefined }), H)).toBeNull(); // a snapshot from before activeAsOf
+    expect(reusableActives(body({ peakDailyActive: undefined }), H)).toBeNull();
+    expect(reusableActives(body({ activeLast7d: "9" }), H)).toBeNull();
+    expect(reusableActives(body({ activeAsOf: "not a time" }), H)).toBeNull();
+    expect(reusableActives("{not json", H)).toBeNull();
+    expect(reusableActives(null, H)).toBeNull();
+  });
+
+  it("a reused peakDailyActive is a floor, never a ceiling: a busier completed day still raises it", async () => {
+    // A snapshot claiming a peak of 1, reused; then the rollups show a day of 3.
+    const prev = { activeLast24h: 1, activeLast7d: 1, dailyFloor: 1, asOfMs: H };
+    const rows = [
+      { day: "2026-10-09", unique_30d: 3, version_mix_7d: JSON.stringify({ denominator: 3, versions: [] }), active_1d: 3, usage_buckets_1d: 0 },
+    ];
+    const m = await computeMetrics(env.DB, H + 10 * MIN, rows, prev);
+    expect(m).toMatchObject({ peakDailyActive: 3, peakWeeklyActive: 3, activeLast24h: 1, activeAsOf: "2026-10-10T12:00:00Z" });
+  });
+});
+
 describe("daily rollups", () => {
   const DAY1 = Date.parse("2026-10-01T00:00:00Z");
 
@@ -263,7 +492,10 @@ describe("daily rollups", () => {
 
     const back = DAY1 + 41 * DAY + 5 * MIN; // first pass of Nov 11th: Oct 2..Nov 10 are missing
     await runScheduled(counted, back);
-    expect(queries).toBeLessThan(50);
+    expect(queries).toBeLessThanOrEqual(MAX_D1_QUERIES_PER_PASS);
+    // A rollup already exists, so the first-heartbeat read is skipped, and there is no
+    // snapshot to reuse, so the live scans run: one under the worst case.
+    expect(queries).toBe(MAX_D1_QUERIES_PER_PASS - 1);
     expect((await daily()).length).toBe(1 + MAX_ROLLUP_DAYS_PER_PASS);
     // The pass got past the rollup: the snapshot was written.
     const snap = await env.DB.prepare("SELECT generated_at FROM metrics_snapshot WHERE id = 1").first<{ generated_at: string }>();
@@ -275,6 +507,26 @@ describe("daily rollups", () => {
     const days = (await daily()).map((r) => r.day);
     expect(days.length).toBe(41); // Oct 1 .. Nov 10, no gap
     expect(days[days.length - 1]).toBe("2026-11-10");
+  });
+
+  it("the worst-case pass is exactly MAX_D1_QUERIES_PER_PASS, 44, under the free tier's 50; a pass reusing the live scans is 3 fewer", async () => {
+    // No rollup and no snapshot has ever been written, and the first heartbeat is
+    // twenty days back: both starting reads run, a full MAX_ROLLUP_DAYS_PER_PASS
+    // days roll up, and the three live scans run.
+    await beat(A, "2.0.0", DAY1 - 20 * DAY + 60 * MIN);
+    const first = recording();
+    await runScheduled(first.db, DAY1 + 5 * MIN);
+    expect((await daily()).length).toBe(MAX_ROLLUP_DAYS_PER_PASS);
+    expect(MAX_D1_QUERIES_PER_PASS).toBe(44);
+    expect(first.sql).toHaveLength(MAX_D1_QUERIES_PER_PASS);
+    expect(MAX_D1_QUERIES_PER_PASS).toBeLessThan(50);
+
+    // Ten minutes on, another full seven days roll up. A rollup now exists (no
+    // first-heartbeat read) and the snapshot is fresh (no live scans).
+    const second = recording();
+    await runScheduled(second.db, DAY1 + 15 * MIN);
+    expect((await daily()).length).toBe(2 * MAX_ROLLUP_DAYS_PER_PASS);
+    expect(second.sql).toHaveLength(MAX_D1_QUERIES_PER_PASS - 1 - 3);
   });
 
   it("writes nothing when there has never been a heartbeat", async () => {
@@ -345,6 +597,11 @@ describe("GET /metrics.json", () => {
       "weeklyActive",
       "usageHours",
       "installsAllTime",
+      "activeLast24h",
+      "activeLast7d",
+      "activeAsOf",
+      "peakDailyActive",
+      "peakWeeklyActive",
       "definitions",
     ]);
     expect(body).toMatchObject({
@@ -359,6 +616,13 @@ describe("GET /metrics.json", () => {
       weeklyActive: 0,
       // A, B, C, D and E each counted once, when first seen; D's later beat is not in the snapshot yet and is not new anyway.
       installsAllTime: 5,
+      // Rolling, up to the snapshot's 12:15: A, B and C beat today. D is 20 days old, E 40.
+      activeLast24h: 3,
+      activeLast7d: 3,
+      activeAsOf: "2026-10-01T12:15:00Z", // the pass a day earlier is over an hour old: scanned afresh
+      // Today's A, B and C beat every earlier day and week.
+      peakDailyActive: 3,
+      peakWeeklyActive: 3,
     });
     expect(body.definitions).toEqual(DEFINITIONS);
     expect(JSON.stringify(body)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/); // no install id leaks into the public file

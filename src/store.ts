@@ -4,11 +4,13 @@
 
 import type { Heartbeat } from "./validate";
 import {
+  ACTIVE_REFRESH_MS,
   CONCURRENT_WINDOW_MS,
   DAILY_ACTIVE_WINDOW_MS,
   DAY_MS,
   RATE_LIMIT_MS,
   RETENTION_DAYS,
+  ROLLING_WEEK_WINDOW_MS,
   UNIQUE_WINDOW_MS,
   VERSION_WINDOW_MS,
   bucketStart,
@@ -176,6 +178,82 @@ export async function uniqueUsers30d(db: D1Database, asOfMs: number): Promise<nu
   return distinctIdsSeen(db, asOfMs - UNIQUE_WINDOW_MS, asOfMs);
 }
 
+/** Distinct ids seen since 00:00 UTC today, up to `now`: the current UTC day so far. One query. */
+export async function activeTodaySoFar(db: D1Database, nowMs: number): Promise<number> {
+  // The window is open at its start, so starting 1 ms before midnight admits a beat AT midnight.
+  return distinctIdsSeen(db, dayStartMs(nowMs) - 1, nowMs);
+}
+
+/**
+ * The live figures that include the current moment, and when they were taken.
+ * `dailyFloor` is what peakDailyActive takes today to be: the current UTC day's
+ * distinct count when scanned, or the previous snapshot's peakDailyActive when
+ * reused (itself an observed day, so it can never overstate the peak).
+ */
+export interface LiveActives {
+  activeLast24h: number;
+  activeLast7d: number;
+  dailyFloor: number;
+  asOfMs: number;
+}
+
+/**
+ * The three live scans of the raw table: the rolling 24 hours, the rolling 7
+ * days, and today since 00:00 UTC. Three queries, each reading every raw row in
+ * its window, which is why the cron pass runs them at most once per
+ * ACTIVE_REFRESH_MS (reusableActives) and not every 10 minutes: the 7-day one
+ * alone would read about 1,008 rows per online install per pass (README, Known
+ * limits).
+ */
+export async function scanActives(db: D1Database, nowMs: number): Promise<LiveActives> {
+  return {
+    activeLast24h: await distinctIdsSeen(db, nowMs - DAILY_ACTIVE_WINDOW_MS, nowMs),
+    activeLast7d: await distinctIdsSeen(db, nowMs - ROLLING_WEEK_WINDOW_MS, nowMs),
+    dailyFloor: await activeTodaySoFar(db, nowMs),
+    asOfMs: nowMs,
+  };
+}
+
+/**
+ * The previous snapshot's live figures, if they may stand in for a fresh scan:
+ * taken less than ACTIVE_REFRESH_MS before `now` (and not after it), with every
+ * field present. Anything else (no snapshot, a snapshot from before these
+ * fields, an unreadable one, a stale one) answers null, and the pass scans.
+ */
+export function reusableActives(snapshotBody: string | null, nowMs: number): LiveActives | null {
+  if (!snapshotBody) return null;
+  let m: Partial<Metrics>;
+  try {
+    m = JSON.parse(snapshotBody) as Partial<Metrics>;
+  } catch {
+    return null;
+  }
+  const asOfMs = typeof m.activeAsOf === "string" ? Date.parse(m.activeAsOf) : NaN;
+  if (!Number.isFinite(asOfMs) || asOfMs > nowMs || nowMs - asOfMs >= ACTIVE_REFRESH_MS) return null;
+  if (typeof m.activeLast24h !== "number" || typeof m.activeLast7d !== "number" || typeof m.peakDailyActive !== "number") return null;
+  return { activeLast24h: m.activeLast24h, activeLast7d: m.activeLast7d, dailyFloor: m.peakDailyActive, asOfMs };
+}
+
+/**
+ * peakDailyActive and peakWeeklyActive, today included. The per-day figures
+ * come from the rollup rows the pass has already read (no query of their own),
+ * so a peak outlives the 90-day purge of the raw rows; today adds the current
+ * UTC day's distinct count and the rolling 7 days up to the live scan.
+ */
+export function peaksFrom(
+  rows: readonly RollupRow[],
+  dailyFloor: number,
+  rolling7d: number,
+): { peakDailyActive: number; peakWeeklyActive: number } {
+  let daily = dailyFloor;
+  let weekly = rolling7d;
+  for (const r of rows) {
+    daily = Math.max(daily, r.active_1d);
+    weekly = Math.max(weekly, (JSON.parse(r.version_mix_7d) as VersionMix).denominator);
+  }
+  return { peakDailyActive: daily, peakWeeklyActive: weekly };
+}
+
 export async function concurrentNow(db: D1Database, nowMs: number): Promise<number> {
   return distinctIdsSeen(db, nowMs - CONCURRENT_WINDOW_MS, nowMs);
 }
@@ -196,10 +274,23 @@ export async function peakConcurrent(db: D1Database): Promise<{ count: number; b
  * limits page, read 2026-09-24). Without a cap, catching up after a cron
  * outage of about two weeks would throw before the purge and the snapshot ran.
  * Seven days is 28 queries, so a whole pass (with both snapshots, the
- * today-so-far read and the all-time installs read) is at most 40. The rest of the
- * backlog waits for the next pass, ten minutes later.
+ * today-so-far read, the all-time installs read, the previous snapshot's read
+ * and the hourly live scans) is at most 44 (MAX_D1_QUERIES_PER_PASS). The rest
+ * of the backlog waits for the next pass, ten minutes later.
  */
 export const MAX_ROLLUP_DAYS_PER_PASS = 7;
+
+/**
+ * The most D1 queries one cron pass prepares, and rollup.test.ts pins the worst
+ * case at exactly this: closeBuckets 1; the rollup's two starting reads plus
+ * 4 x MAX_ROLLUP_DAYS_PER_PASS; the purge 1; readRollups 1; the metrics
+ * snapshot 9 (the previous snapshot, peak concurrent, today's usage buckets,
+ * the three live scans, concurrent now, all-time installs, the write); the
+ * history snapshot 2. Workers Free allows 50. It was 40 before the rolling
+ * actives and the peaks. A pass that reuses the live scans (five in six) is 41.
+ * The peaks' per-day half reads the rollup rows already in the pass.
+ */
+export const MAX_D1_QUERIES_PER_PASS = 44;
 
 /**
  * Writes a daily_rollup row for every COMPLETED UTC day that lacks one, from
@@ -328,6 +419,16 @@ export const DEFINITIONS = {
     "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
   usageHours:
     "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar.",
+  activeLast24h:
+    "Distinct opted-in installs that sent a heartbeat in the 24 hours up to activeAsOf. A rolling window that includes today, unlike dailyActive, which ends at the last complete UTC day. Refreshed hourly, not every 10 minutes: activeAsOf is less than an hour before generatedAt.",
+  activeLast7d:
+    "Distinct opted-in installs that sent a heartbeat in the 7 days up to activeAsOf. A rolling window that includes today, unlike weeklyActive, which ends at the last complete UTC day. Refreshed hourly, not every 10 minutes: activeAsOf is less than an hour before generatedAt.",
+  activeAsOf:
+    "When activeLast24h, activeLast7d and the today part of peakDailyActive were last counted. They read every raw heartbeat in their windows, so they are counted once an hour and the figures in between repeat the last count.",
+  peakDailyActive:
+    "The most distinct opted-in installs seen in any single UTC day since launch, today included: the largest of every complete day's dailyActive and the distinct installs seen since 00:00 UTC today, as of activeAsOf (refreshed hourly).",
+  peakWeeklyActive:
+    "The most distinct opted-in installs seen in any 7-day window ending on a UTC day since launch, today included: the largest of every complete day's weeklyActive and activeLast7d (the 7 days up to activeAsOf, refreshed hourly).",
   installsAllTime:
     "Opted-in installs counted when first seen: each adds one the first time it sends a heartbeat. A lower bound, not total users: telemetry is off unless the player turns it on. It is a single running count, so no install id is kept to compute it; the raw heartbeats it is counted from are still deleted after 90 days. An install silent for more than 90 days, or one whose data was deleted, counts again if it comes back, and so does one that opts out and back in (a new id). Deleting an install's data does not lower it.",
 } as const;
@@ -344,6 +445,11 @@ export interface Metrics {
   weeklyActive: number;
   usageHours: UsageHours;
   installsAllTime: number;
+  activeLast24h: number;
+  activeLast7d: number;
+  activeAsOf: string;
+  peakDailyActive: number;
+  peakWeeklyActive: number;
   definitions: typeof DEFINITIONS;
 }
 
@@ -354,6 +460,11 @@ export interface Metrics {
  * day for a number that moves slowly. The 1- and 7-day counts follow the same
  * rule for the same reason. Before the first complete day all are zero, which
  * is the truth about a day that has not ended.
+ *
+ * activeLast24h, activeLast7d and today's part of peakDailyActive are the
+ * deliberate exception: live scans that include today, because a headline that
+ * leaves out the day it is read on reads as wrong (launch day, 2026-09-28).
+ * Even they run hourly, not every pass (scanActives, reusableActives).
  *
  * weeklyActive is the 7-day version mix's denominator, not a second query: it
  * is the same distinct set over the same window, and one producer cannot
@@ -366,12 +477,23 @@ function latestDaily(rows: readonly RollupRow[]): { unique30d: number; active1d:
     : { unique30d: 0, active1d: 0, mix: { denominator: 0, versions: [] } };
 }
 
-/** `rollups` lets the cron pass share one read with the history; omitted, it is read here. */
-export async function computeMetrics(db: D1Database, nowMs: number, rollups?: readonly RollupRow[]): Promise<Metrics> {
+/**
+ * `rollups` lets the cron pass share one read with the history; omitted, it is
+ * read here. `live` is the previous snapshot's live figures when they may be
+ * reused (reusableActives); omitted or null, the three live scans run.
+ */
+export async function computeMetrics(
+  db: D1Database,
+  nowMs: number,
+  rollups?: readonly RollupRow[],
+  live?: LiveActives | null,
+): Promise<Metrics> {
   const rows = rollups ?? (await readRollups(db));
   const peak = await peakConcurrent(db);
   const daily = latestDaily(rows);
   const todayBuckets = await todayInstallBuckets(db, nowMs);
+  const actives = live ?? (await scanActives(db, nowMs));
+  const peaks = peaksFrom(rows, actives.dailyFloor, actives.activeLast7d);
   return {
     schema: 1,
     generatedAt: iso(nowMs),
@@ -384,12 +506,22 @@ export async function computeMetrics(db: D1Database, nowMs: number, rollups?: re
     weeklyActive: daily.mix.denominator,
     usageHours: usageHoursFrom(rows, todayBuckets),
     installsAllTime: await installsAllTime(db),
+    activeLast24h: actives.activeLast24h,
+    activeLast7d: actives.activeLast7d,
+    activeAsOf: iso(actives.asOfMs),
+    peakDailyActive: peaks.peakDailyActive,
+    peakWeeklyActive: peaks.peakWeeklyActive,
     definitions: DEFINITIONS,
   };
 }
 
+/**
+ * Reads the snapshot it is about to replace first (one query, one row), so the
+ * hourly live scans can be reused from it in between.
+ */
 export async function writeMetricsSnapshot(db: D1Database, nowMs: number, rollups?: readonly RollupRow[]): Promise<Metrics> {
-  const metrics = await computeMetrics(db, nowMs, rollups);
+  const live = reusableActives(await readMetricsSnapshot(db), nowMs);
+  const metrics = await computeMetrics(db, nowMs, rollups, live);
   await db
     .prepare(
       `INSERT INTO metrics_snapshot (id, generated_at, body) VALUES (1, ?1, ?2)
