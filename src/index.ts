@@ -20,9 +20,14 @@ import {
   runScheduled,
 } from "./store";
 import { REPORT_HTML, WIDGET_CSS, WIDGET_JS } from "./widget";
+import { dispatchPagesRefresh } from "./dispatch";
 
 export interface Env {
   DB: D1Database;
+  /** Optional Worker secret: a fine-grained GitHub token (Actions read/write on
+   * DranakCorps-bot/EQBuddy only) that lets the cron refresh the landing page hourly.
+   * Absent = no refresh; see src/dispatch.ts. */
+  GITHUB_DISPATCH_TOKEN?: string;
 }
 
 const METRICS_CACHE_SECONDS = 600;
@@ -152,6 +157,17 @@ export default {
   },
 
   async scheduled(controller, env, ctx): Promise<void> {
-    ctx.waitUntil(runScheduled(env.DB, controller.scheduledTime));
+    ctx.waitUntil(
+      (async () => {
+        // The metrics pass first, so the landing refresh it triggers reads this pass's
+        // figures; the refresh runs even if the pass throws (the page then shows the
+        // last good snapshot) and can never fail the pass.
+        try {
+          await runScheduled(env.DB, controller.scheduledTime);
+        } finally {
+          await dispatchPagesRefresh(env.GITHUB_DISPATCH_TOKEN, controller.scheduledTime);
+        }
+      })(),
+    );
   },
 } satisfies ExportedHandler<Env>;
