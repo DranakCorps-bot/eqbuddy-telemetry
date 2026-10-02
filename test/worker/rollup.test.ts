@@ -494,8 +494,9 @@ describe("daily rollups", () => {
     await runScheduled(counted, back);
     expect(queries).toBeLessThanOrEqual(MAX_D1_QUERIES_PER_PASS);
     // A rollup already exists, so the first-heartbeat read is skipped, and there is no
-    // snapshot to reuse, so the live scans run: one under the worst case.
-    expect(queries).toBe(MAX_D1_QUERIES_PER_PASS - 1);
+    // snapshot to reuse, so the live scans run; no GitHub read was asked for, so no
+    // downloads row is written: two under the worst case.
+    expect(queries).toBe(MAX_D1_QUERIES_PER_PASS - 2);
     expect((await daily()).length).toBe(1 + MAX_ROLLUP_DAYS_PER_PASS);
     // The pass got past the rollup: the snapshot was written.
     const snap = await env.DB.prepare("SELECT generated_at FROM metrics_snapshot WHERE id = 1").first<{ generated_at: string }>();
@@ -509,24 +510,31 @@ describe("daily rollups", () => {
     expect(days[days.length - 1]).toBe("2026-11-10");
   });
 
-  it("the worst-case pass is exactly MAX_D1_QUERIES_PER_PASS, 44, under the free tier's 50; a pass reusing the live scans is 3 fewer", async () => {
+  it("the worst-case pass is exactly MAX_D1_QUERIES_PER_PASS, 46, under the free tier's 50; a pass reusing the live scans is 3 fewer", async () => {
     // No rollup and no snapshot has ever been written, and the first heartbeat is
     // twenty days back: both starting reads run, a full MAX_ROLLUP_DAYS_PER_PASS
-    // days roll up, and the three live scans run.
+    // days roll up, the three live scans run, and it is the hour's first tick with
+    // GitHub answering, so the downloads row is written (DRA-783).
     await beat(A, "2.0.0", DAY1 - 20 * DAY + 60 * MIN);
+    const github = (async () =>
+      new Response(
+        JSON.stringify([{ tag_name: "v2.0.0", draft: false, created_at: "2026-09-28T20:52:47Z", assets: [{ name: "EQBuddyEvolvedSetup.exe", download_count: 5 }] }]),
+        { status: 200 },
+      )) as unknown as typeof fetch;
     const first = recording();
-    await runScheduled(first.db, DAY1 + 5 * MIN);
+    await runScheduled(first.db, DAY1 + 5 * MIN, github);
     expect((await daily()).length).toBe(MAX_ROLLUP_DAYS_PER_PASS);
-    expect(MAX_D1_QUERIES_PER_PASS).toBe(44);
+    expect(MAX_D1_QUERIES_PER_PASS).toBe(46);
     expect(first.sql).toHaveLength(MAX_D1_QUERIES_PER_PASS);
     expect(MAX_D1_QUERIES_PER_PASS).toBeLessThan(50);
 
     // Ten minutes on, another full seven days roll up. A rollup now exists (no
-    // first-heartbeat read) and the snapshot is fresh (no live scans).
+    // first-heartbeat read), the snapshot is fresh (no live scans) and it is not the
+    // hour's first tick (no downloads write).
     const second = recording();
-    await runScheduled(second.db, DAY1 + 15 * MIN);
+    await runScheduled(second.db, DAY1 + 15 * MIN, github);
     expect((await daily()).length).toBe(2 * MAX_ROLLUP_DAYS_PER_PASS);
-    expect(second.sql).toHaveLength(MAX_D1_QUERIES_PER_PASS - 1 - 3);
+    expect(second.sql).toHaveLength(MAX_D1_QUERIES_PER_PASS - 1 - 3 - 1);
   });
 
   it("writes nothing when there has never been a heartbeat", async () => {
@@ -602,6 +610,7 @@ describe("GET /metrics.json", () => {
       "activeAsOf",
       "peakDailyActive",
       "peakWeeklyActive",
+      "downloads",
       "definitions",
     ]);
     expect(body).toMatchObject({
@@ -654,6 +663,7 @@ describe("the storage shape", () => {
     metrics_snapshot: ["id", "generated_at", "body"],
     history_snapshot: ["id", "generated_at", "body"],
     all_time_total: ["id", "installs_first_seen"],
+    downloads_daily: ["day", "total", "as_of"],
   };
 
   it("has exactly the documented tables and columns", async () => {
