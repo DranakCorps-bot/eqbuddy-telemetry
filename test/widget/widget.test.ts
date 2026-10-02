@@ -4,7 +4,7 @@
 
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import { CHART_NAMES, DEFAULT_TILE_NAMES, REPORT_TILE_NAMES, TILE_NAMES, WIDGET_CSS, WIDGET_JS } from "../../src/widget";
+import { CHART_NAMES, DEFAULT_CHART_NAMES, DEFAULT_TILE_NAMES, REPORT_TILE_NAMES, TILE_NAMES, WIDGET_CSS, WIDGET_JS } from "../../src/widget";
 
 interface Api {
   version: number;
@@ -148,7 +148,7 @@ describe("rendering", () => {
   it("renders every tile and chart by default, with the opt-in and usage labels", () => {
     const html = load().render(METRICS, HISTORY);
     expect(attrValues(html, "data-tile")).toEqual([...DEFAULT_TILE_NAMES]);
-    expect(attrValues(html, "data-chart")).toEqual([...CHART_NAMES]);
+    expect(attrValues(html, "data-chart")).toEqual([...DEFAULT_CHART_NAMES]);
     expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
     // The usage tile and the usage chart each carry the exact label.
     expect(html.split("estimated, opted-in installs only, 10-minute resolution")).toHaveLength(3);
@@ -218,7 +218,7 @@ describe("empty and thin data", () => {
   it("before the first complete UTC day, zero figures read 'collecting data', not 0", () => {
     const html = load().render(EMPTY_METRICS, EMPTY_HISTORY);
     for (const name of DEFAULT_TILE_NAMES) expect(tileState(html, name), name).toBe("collecting");
-    for (const name of CHART_NAMES) expect(html, name).toContain(`data-chart="${name}" data-state="collecting"`);
+    for (const name of DEFAULT_CHART_NAMES) expect(html, name).toContain(`data-chart="${name}" data-state="collecting"`);
     expect(html).toContain("collecting data");
     expect(html).not.toMatch(/eqbt-tile-value">0</);
     expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
@@ -545,5 +545,60 @@ describe("mounting into a container", () => {
       "https://eqbuddy-telemetry.example.workers.dev/history.json",
     ]);
     expect(attrValues(el.innerHTML, "data-chart")).toEqual([]);
+  });
+});
+
+describe("the OS chart (DRA-784)", () => {
+  const OS_MIX = {
+    since: "2026-10-02",
+    denominator: 96,
+    families: [
+      { family: "windows", count: 96, share: 1 },
+      { family: "macos-wine", count: 0, share: 0 },
+      { family: "linux-wine", count: 0, share: 0 },
+      { family: "wine-other", count: 0, share: 0 },
+      { family: "other", count: 0, share: 0 },
+    ],
+  };
+  const CAVEAT =
+    "Wine is counted only where the app reports it: Wine that hides itself, and any install whose app does not report Wine, counts as Windows.";
+
+  it("is a named chart but not a default: an embed that never named its charts keeps the four it drew", () => {
+    const api = load() as Api & { DEFAULT_CHARTS: string[]; OS_CAVEAT: string };
+    expect(api.CHARTS).toContain("os");
+    expect(api.DEFAULT_CHARTS).toEqual([...DEFAULT_CHART_NAMES]);
+    expect(DEFAULT_CHART_NAMES).not.toContain("os");
+    expect(api.OS_CAVEAT).toBe(CAVEAT);
+    expect(attrValues(api.render({ ...METRICS, osMix7d: OS_MIX }, HISTORY), "data-chart")).not.toContain("os");
+  });
+
+  it("draws every family, zeros included, titled Users by OS, with the denominator, since and the Wine caveat", () => {
+    const html = load().render({ ...METRICS, osMix7d: OS_MIX }, HISTORY, { tiles: "none", charts: "versions os" });
+    expect(attrValues(html, "data-chart")).toEqual(["versions", "os"]);
+    expect(html).toContain('data-chart="os" data-state="ready"');
+    expect(html).toContain("Users by OS, last 7 days");
+    const os = html.slice(html.indexOf('data-chart="os"'));
+    expect([...os.matchAll(/eqbt-vlabel">([^<]*)</g)].map((m) => m[1])).toEqual(["Windows", "macOS (Wine)", "Linux (Wine)", "Wine, other host", "Other"]);
+    expect(os).toContain("100% (96)");
+    expect(os.split("0% (0)")).toHaveLength(5);
+    expect(os).toContain("Of 96 installs seen in the 7 days to the last complete UTC day, each on the OS it reported last, counted from Oct 2 on.");
+    expect(os).toContain(CAVEAT);
+  });
+
+  it("before osMix7d exists, or with nobody in the window, it reads collecting data and still says the caveat", () => {
+    const { osMix7d: _absent, ...noField } = { ...METRICS, osMix7d: OS_MIX };
+    for (const m of [noField, { ...METRICS, osMix7d: null }, { ...METRICS, osMix7d: { ...OS_MIX, denominator: 0 } }]) {
+      const html = load().render(m, HISTORY, { tiles: "none", charts: "os" });
+      expect(html).toContain('data-chart="os" data-state="collecting"');
+      expect(html).toContain(CAVEAT);
+      expect(html).not.toContain("eqbt-vrow");
+    }
+  });
+
+  it("an unknown family from a later server prints its name, escaped", () => {
+    const odd = { ...OS_MIX, families: [{ family: "<b>bsd</b>", count: 1, share: 1 }] };
+    const html = load().render({ ...METRICS, osMix7d: odd }, HISTORY, { tiles: "none", charts: "os" });
+    expect(html).toContain("&lt;b&gt;bsd&lt;/b&gt;");
+    expect(html).not.toContain("<b>");
   });
 });

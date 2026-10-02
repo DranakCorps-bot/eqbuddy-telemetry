@@ -339,6 +339,7 @@ describe("peakDailyActive and peakWeeklyActive: the busiest day and week since l
       version_mix_7d: JSON.stringify({ denominator: weekly, versions: [] }),
       active_1d,
       usage_buckets_1d: 0,
+      os_mix_7d: null,
     });
     const rows = [row("2026-10-01", 5, 9), row("2026-10-02", 2, 7)];
     expect(peaksFrom(rows, 4, 8)).toEqual({ peakDailyActive: 5, peakWeeklyActive: 9 });
@@ -412,7 +413,7 @@ describe("the live scans run at most hourly; the passes between reuse the last s
     // A snapshot claiming a peak of 1, reused; then the rollups show a day of 3.
     const prev = { activeLast24h: 1, activeLast7d: 1, dailyFloor: 1, asOfMs: H };
     const rows = [
-      { day: "2026-10-09", unique_30d: 3, version_mix_7d: JSON.stringify({ denominator: 3, versions: [] }), active_1d: 3, usage_buckets_1d: 0 },
+      { day: "2026-10-09", unique_30d: 3, version_mix_7d: JSON.stringify({ denominator: 3, versions: [] }), active_1d: 3, usage_buckets_1d: 0, os_mix_7d: null },
     ];
     const m = await computeMetrics(env.DB, H + 10 * MIN, rows, prev);
     expect(m).toMatchObject({ peakDailyActive: 3, peakWeeklyActive: 3, activeLast24h: 1, activeAsOf: "2026-10-10T12:00:00Z" });
@@ -611,6 +612,7 @@ describe("GET /metrics.json", () => {
       "peakDailyActive",
       "peakWeeklyActive",
       "downloads",
+      "osMix7d",
       "definitions",
     ]);
     expect(body).toMatchObject({
@@ -659,7 +661,7 @@ describe("the storage shape", () => {
   const EXPECTED: Record<string, string[]> = {
     heartbeat: ["install_id", "bucket_start", "app_version", "os", "last_seen_ms"],
     bucket_count: ["bucket_start", "distinct_ids"],
-    daily_rollup: ["day", "unique_30d", "version_mix_7d", "active_1d", "usage_buckets_1d"],
+    daily_rollup: ["day", "unique_30d", "version_mix_7d", "active_1d", "usage_buckets_1d", "os_mix_7d"],
     metrics_snapshot: ["id", "generated_at", "body"],
     history_snapshot: ["id", "generated_at", "body"],
     all_time_total: ["id", "installs_first_seen"],

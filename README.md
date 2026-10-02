@@ -77,13 +77,15 @@ creates it, `0002_daily_active.sql` adds one id-free count to
 `history_snapshot` table, `0004_installs_all_time.sql` creates the
 one-row `all_time_total` count (backfilled from `heartbeat`), and
 `0005_downloads.sql` creates `downloads_daily`, which holds a number GitHub
-publishes and nothing from any install. Only `heartbeat` holds an install id:
+publishes and nothing from any install, and `0006_os_mix.sql` adds each day's
+OS-family counts to `daily_rollup` (nullable, not backfilled). Only
+`heartbeat` holds an install id:
 
 | Table | Columns | Kept |
 |---|---|---|
 | `heartbeat` | `install_id`, `bucket_start`, `app_version`, `os`, `last_seen_ms` | 90 days, or until you delete |
 | `bucket_count` | `bucket_start`, `distinct_ids` | Indefinitely (no ids) |
-| `daily_rollup` | `day`, `unique_30d`, `version_mix_7d`, `active_1d`, `usage_buckets_1d` | Indefinitely (no ids) |
+| `daily_rollup` | `day`, `unique_30d`, `version_mix_7d`, `active_1d`, `usage_buckets_1d`, `os_mix_7d` | Indefinitely (no ids) |
 | `metrics_snapshot` | `id`, `generated_at`, `body` | One row, overwritten |
 | `history_snapshot` | `id`, `generated_at`, `body` | One row, overwritten |
 | `all_time_total` | `id`, `installs_first_seen` | One row, one integer, indefinitely (no ids). Only ever goes up |
@@ -128,7 +130,18 @@ A test pins every column of every table. Adding one fails the build.
     "total": 1339, "last30d": 1339, "last30dNote": null,
     "asOf": "2026-10-02T12:00:00Z"
   },
-  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "activeLast24h": "…", "activeLast7d": "…", "activeAsOf": "…", "peakDailyActive": "…", "peakWeeklyActive": "…", "downloads": "…", "installsAllTime": "…" }
+  "osMix7d": {
+    "since": "2026-10-02",
+    "denominator": 96,
+    "families": [
+      { "family": "windows", "count": 96, "share": 1 },
+      { "family": "macos-wine", "count": 0, "share": 0 },
+      { "family": "linux-wine", "count": 0, "share": 0 },
+      { "family": "wine-other", "count": 0, "share": 0 },
+      { "family": "other", "count": 0, "share": 0 }
+    ]
+  },
+  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "activeLast24h": "…", "activeLast7d": "…", "activeAsOf": "…", "peakDailyActive": "…", "peakWeeklyActive": "…", "downloads": "…", "osMix7d": "…", "installsAllTime": "…" }
 }
 ```
 
@@ -148,6 +161,19 @@ A test pins every column of every table. Adding one fails the build.
 | `peakDailyActive` | The most distinct ids in any single UTC day since launch, **today included**: the largest of every complete day's `dailyActive` and the distinct ids seen since 00:00 UTC today (as of `activeAsOf`) | Hourly for today; daily for the days before |
 | `peakWeeklyActive` | The most distinct ids in any 7-day window ending on a UTC day since launch, **today included**: the largest of every complete day's `weeklyActive` and `activeLast7d` | Hourly for the rolling week; daily for the days before |
 | `downloads` | **Not telemetry.** Fetches of the EQBuddy Evolved installer and portable zip from GitHub, from v2.0.0 (2026-09-28). `total` since then, `last30d` in the 30 days up to `asOf` (or `null` with `last30dNote`). See [Downloads](#downloads-not-telemetry). `null` before the first successful read | Hourly |
+| `osMix7d` | The same ids `versionMix7d` divides, by **OS family**, each id once on the `os` it reported **last**. Every family is listed, zeros included: `windows`, `macos-wine`, `linux-wine`, `wine-other` (Wine on another host) and `other` (a value matching none of the forms the app sends). **Wine is counted only where the app reports it:** Wine that hides itself, and any install whose app does not report Wine, counts as `windows`. `since` is the first UTC day counted; earlier days have no OS figure and are not filled in. `null` until that first day is complete | Daily |
+
+**The OS mix is computed on the server only**, from the `os` field every
+heartbeat already carries (DRA-784). No field was added to the payload and no
+raw `os` value leaves the `heartbeat` table: `daily_rollup.os_mix_7d` and
+`metrics.json` hold a count per family. The family is read by
+[`src/os.ts`](src/os.ts), which matches each known form whole, so an
+unrecognised value is counted as `other` rather than guessed. The version and
+OS mixes come from one query over each id's latest row in the window, so their
+denominators are the same set, and a rollup day still costs four queries. The
+app has always sent `Windows <major>.<minor>.<build>`, including under Wine, so
+until it reports Wine the mix reads 100% `windows`, and that is the expected,
+correct reading.
 
 **Usage hours are computed on the server only**, from the id-free
 `bucket_count` table. The heartbeat payload did not change. The rollup writes
@@ -330,7 +356,7 @@ script loads.
 | Attribute | Default | Meaning |
 |---|---|---|
 | `data-tiles` | `concurrentNow peakConcurrent activeLast24h activeLast7d uniqueUsers30d usageHoursAllTime` | Tile names, space- or comma-separated, shown in the order given, or `all` (every tile) or `none` |
-| `data-charts` | all | Chart names, the same way |
+| `data-charts` | `actives concurrent usageHours versions` | Chart names, the same way, or `all` or `none` |
 | `data-base` | the host `widget.js` came from | Where to fetch `metrics.json` and `history.json` |
 
 | Tile | Shows |
@@ -364,6 +390,7 @@ over a snapshot from before the peaks reads *collecting data*, never 0.
 | `concurrent` | Concurrent installs per 10-minute bucket, last 7 days, times in America/Chicago |
 | `usageHours` | Usage hours per UTC day (bars) |
 | `versions` | The current 7-day version mix |
+| `os` | *Users by OS, last 7 days*: `osMix7d`, every family as a bar, with the line *"Wine is counted only where the app reports it: Wine that hides itself, and any install whose app does not report Wine, counts as Windows."* **Not a default:** an embed that names no charts keeps the four above. `/report` shows it, beside `versions` |
 
 Each tile shows the definition `metrics.json` publishes for it. Charts have a
 hover crosshair and tooltip, and the two daily charts also have a table view.
@@ -507,6 +534,12 @@ fixtures with known answers:
   the first pre-2.0 one; every failed read keeping the previous total and never
   writing 0; `last30d` inside the window, after it, and `null` with its note in
   the gap; the hourly tick; and `usageHours.allTimeRounded` rounding half up.
+- `test/worker/osmix.test.ts`: the OS mix against a fixture (latest OS per id,
+  zeros kept, a value that matches nothing), its shared denominator with the
+  version mix and `weeklyActive`, the rollup column, `since` over days written
+  before the column, and that no raw `os` value reaches `metrics.json`.
+- `test/static/os.test.ts`: the family classifier on the exact strings, every
+  family reachable, and strings that match nothing.
 - `test/static/guards.test.ts`: no address read, no logging, platform logging
   off, no secrets tracked.
 
