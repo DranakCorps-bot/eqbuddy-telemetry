@@ -397,7 +397,7 @@ export interface RollupRow {
   version_mix_7d: string;
   active_1d: number;
   usage_buckets_1d: number;
-  /** JSON of an OsMix; null on a row written before migration 0005. */
+  /** JSON of an OsMix; null on a row written before migration 0006. */
   os_mix_7d: string | null;
 }
 
@@ -535,7 +535,7 @@ export interface PublishedOsMix extends OsMix {
 
 /**
  * From the rollup rows already read: the latest row's OS mix, with the first
- * day that has one. Rows written before migration 0005 have none, and they are
+ * day that has one. Rows written before migration 0006 have none, and they are
  * never filled in, so `since` is where the figure starts. null while the latest
  * row has none (no complete day since the column existed). No query.
  */

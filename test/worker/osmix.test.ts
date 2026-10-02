@@ -125,7 +125,7 @@ describe("the rollup writes it and metrics.json publishes it", () => {
   });
 
   it("days rolled up before the column existed stay empty, and since names the first day that has one", async () => {
-    // Two days written before migration 0005: no OS figure.
+    // Two days written before migration 0006: no OS figure.
     for (const day of ["2026-09-29", "2026-09-30"]) {
       await env.DB
         .prepare("INSERT INTO daily_rollup (day, unique_30d, version_mix_7d, active_1d, usage_buckets_1d) VALUES (?1, 1, ?2, 1, 6)")
