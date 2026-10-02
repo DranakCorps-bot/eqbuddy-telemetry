@@ -26,7 +26,8 @@ export interface Env {
   DB: D1Database;
   /** Optional Worker secret: a fine-grained GitHub token (Actions read/write on
    * DranakCorps-bot/EQBuddy only) that lets the cron refresh the landing page hourly.
-   * Absent = no refresh; see src/dispatch.ts. */
+   * Absent = no refresh; see src/dispatch.ts. The same token authenticates the hourly
+   * releases read (src/downloads.ts, DRA-835); absent, that read is unauthenticated. */
   GITHUB_DISPATCH_TOKEN?: string;
 }
 
@@ -163,7 +164,7 @@ export default {
         // figures; the refresh runs even if the pass throws (the page then shows the
         // last good snapshot) and can never fail the pass.
         try {
-          await runScheduled(env.DB, controller.scheduledTime, fetch);
+          await runScheduled(env.DB, controller.scheduledTime, fetch, env.GITHUB_DISPATCH_TOKEN);
         } finally {
           await dispatchPagesRefresh(env.GITHUB_DISPATCH_TOKEN, controller.scheduledTime);
         }

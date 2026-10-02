@@ -104,6 +104,50 @@ describe("reading GitHub", () => {
     const headers = calls[0].init?.headers as Record<string, string>;
     expect(headers["User-Agent"]).toBe("eqbuddy-telemetry");
     expect(Object.keys(headers).map((h) => h.toLowerCase())).not.toContain("authorization");
+    // The whole request header set, pinned: the unauthenticated read sends these three and nothing else.
+    expect(Object.keys(headers).sort()).toEqual(["Accept", "User-Agent", "X-GitHub-Api-Version"]);
+  });
+
+  // DRA-835. Unauthenticated, GitHub's 60/hour is per egress IP and Workers share
+  // Cloudflare's, so the read was rate-limited before it ever ran (403, 0 remaining).
+  // With the dispatch token the request admits exactly ONE more header,
+  // Authorization, and the token appears nowhere else.
+  const TOKEN = "github_pat_TEST_ONLY_not_a_real_token";
+
+  it("with a token, every page carries it as a Bearer header and nothing else changes", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const page1 = Array.from({ length: RELEASES_PER_PAGE }, () => release("v2.0.0", "2026-11-01T00:00:00Z", [["a.exe", 1]]));
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      const page = Number(new URL(String(input)).searchParams.get("page"));
+      return new Response(JSON.stringify(page === 1 ? page1 : LIVE_SHAPE), { status: 200 });
+    }) as unknown as typeof fetch;
+    expect(await fetchEvolvedDownloads(fetcher, TOKEN)).toBe(RELEASES_PER_PAGE + 1339);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      const headers = call.init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe(`Bearer ${TOKEN}`);
+      expect(Object.keys(headers).sort()).toEqual(["Accept", "Authorization", "User-Agent", "X-GitHub-Api-Version"]);
+      expect(call.url).not.toContain(TOKEN);
+    }
+  });
+
+  it("an empty or absent token reads unauthenticated, with the same result", async () => {
+    for (const token of [undefined, ""]) {
+      const calls: Array<RequestInit | undefined> = [];
+      const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(init);
+        return new Response(JSON.stringify(LIVE_SHAPE), { status: 200 });
+      }) as unknown as typeof fetch;
+      expect(await fetchEvolvedDownloads(fetcher, token)).toBe(1339);
+      expect(Object.keys(calls[0]?.headers as Record<string, string>).map((h) => h.toLowerCase())).not.toContain("authorization");
+    }
+  });
+
+  it("a token GitHub refuses answers null and writes nothing, never throws", async () => {
+    expect(await fetchEvolvedDownloads(github([LIVE_SHAPE], 401).fetcher, TOKEN)).toBeNull();
+    expect(await refreshDownloads(env.DB, Date.parse("2026-10-02T12:00:00Z"), github([LIVE_SHAPE], 403).fetcher, TOKEN)).toBe(false);
+    expect(await rows()).toEqual([]);
   });
 
   it("follows the pages while a full page is all Evolved, and stops at the first release older than 2.0", async () => {
@@ -258,6 +302,20 @@ describe("the cron and metrics.json", () => {
       asOf: "2026-10-02T12:00:00Z",
     });
     expect(typeof body.usageHours.allTimeRounded).toBe("number");
+  });
+
+  it("the pass hands the token to the read, and metrics.json never carries it", async () => {
+    const token = "github_pat_TEST_ONLY_pass_token";
+    const seen: string[] = [];
+    const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push((init?.headers as Record<string, string>).Authorization);
+      return new Response(JSON.stringify(LIVE_SHAPE), { status: 200 });
+    }) as unknown as typeof fetch;
+    await runScheduled(env.DB, HOUR, fetcher, token);
+    expect(seen).toEqual([`Bearer ${token}`]);
+    const text = await (await handle(new Request("https://t.test/metrics.json"), env, HOUR + MIN)).text();
+    expect(JSON.parse(text).downloads.total).toBe(1339);
+    expect(text).not.toContain(token);
   });
 
   it("a pass whose GitHub read throws still writes the snapshot", async () => {
