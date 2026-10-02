@@ -163,7 +163,7 @@ export default {
         // figures; the refresh runs even if the pass throws (the page then shows the
         // last good snapshot) and can never fail the pass.
         try {
-          await runScheduled(env.DB, controller.scheduledTime);
+          await runScheduled(env.DB, controller.scheduledTime, fetch);
         } finally {
           await dispatchPagesRefresh(env.GITHUB_DISPATCH_TOKEN, controller.scheduledTime);
         }

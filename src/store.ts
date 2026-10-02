@@ -3,6 +3,8 @@
 // clock, and that is all.
 
 import type { Heartbeat } from "./validate";
+import { type Downloads, downloadsFrom, readDownloadRows, refreshDownloads } from "./downloads";
+import { isDispatchTick } from "./dispatch";
 import {
   ACTIVE_REFRESH_MS,
   CONCURRENT_WINDOW_MS,
@@ -285,12 +287,15 @@ export const MAX_ROLLUP_DAYS_PER_PASS = 7;
  * case at exactly this: closeBuckets 1; the rollup's two starting reads plus
  * 4 x MAX_ROLLUP_DAYS_PER_PASS; the purge 1; readRollups 1; the metrics
  * snapshot 9 (the previous snapshot, peak concurrent, today's usage buckets,
- * the three live scans, concurrent now, all-time installs, the write); the
- * history snapshot 2. Workers Free allows 50. It was 40 before the rolling
- * actives and the peaks. A pass that reuses the live scans (five in six) is 41.
+ * the three live scans, concurrent now, all-time installs, the downloads read,
+ * the write); the history snapshot 2; and on the hour's first tick, when
+ * GitHub answered, the downloads row 1. Workers Free allows 50. It was 40
+ * before the rolling actives and the peaks, and 44 before the downloads
+ * (DRA-783). A pass that reuses the live scans (five in six) is 3 fewer, and a
+ * pass off the hour's first tick 1 fewer again.
  * The peaks' per-day half reads the rollup rows already in the pass.
  */
-export const MAX_D1_QUERIES_PER_PASS = 44;
+export const MAX_D1_QUERIES_PER_PASS = 46;
 
 /**
  * Writes a daily_rollup row for every COMPLETED UTC day that lacks one, from
@@ -365,6 +370,13 @@ export interface UsageHours {
   last30d: number;
   allTime: number;
   todaySoFar: number;
+  /** allTime to a whole hour, half up: a badge cannot round, and would print "3019.33" (DRA-783). */
+  allTimeRounded: number;
+}
+
+/** Half up, to a whole number. Usage hours are never negative, so this is the schoolbook rule. */
+export function roundHalfUp(n: number): number {
+  return Math.floor(n + 0.5);
 }
 
 /**
@@ -390,18 +402,22 @@ export async function todayInstallBuckets(db: D1Database, nowMs: number): Promis
  */
 export function usageHoursFrom(rows: readonly RollupRow[], todayBuckets = 0): UsageHours {
   const todaySoFar = bucketsToHours(todayBuckets);
-  if (rows.length === 0) return { yesterday: 0, last7d: 0, last30d: 0, allTime: todaySoFar, todaySoFar };
+  if (rows.length === 0) {
+    return { yesterday: 0, last7d: 0, last30d: 0, allTime: todaySoFar, todaySoFar, allTimeRounded: roundHalfUp(todaySoFar) };
+  }
   const lastMs = Date.parse(`${rows[rows.length - 1].day}T00:00:00Z`);
   const sumSince = (days: number): number => {
     const from = dayKey(lastMs - (days - 1) * DAY_MS);
     return rows.filter((r) => r.day >= from).reduce((s, r) => s + r.usage_buckets_1d, 0);
   };
+  const allTime = bucketsToHours(rows.reduce((s, r) => s + r.usage_buckets_1d, 0) + todayBuckets);
   return {
     yesterday: bucketsToHours(sumSince(1)),
     last7d: bucketsToHours(sumSince(7)),
     last30d: bucketsToHours(sumSince(30)),
-    allTime: bucketsToHours(rows.reduce((s, r) => s + r.usage_buckets_1d, 0) + todayBuckets),
+    allTime,
     todaySoFar,
+    allTimeRounded: roundHalfUp(allTime),
   };
 }
 
@@ -418,7 +434,7 @@ export const DEFINITIONS = {
   weeklyActive:
     "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
   usageHours:
-    "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar.",
+    "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar. allTimeRounded is allTime to the nearest whole hour (half up), for a badge that cannot round.",
   activeLast24h:
     "Distinct opted-in installs that sent a heartbeat in the 24 hours up to activeAsOf. A rolling window that includes today, unlike dailyActive, which ends at the last complete UTC day. Refreshed hourly, not every 10 minutes: activeAsOf is less than an hour before generatedAt.",
   activeLast7d:
@@ -429,6 +445,8 @@ export const DEFINITIONS = {
     "The most distinct opted-in installs seen in any single UTC day since launch, today included: the largest of every complete day's dailyActive and the distinct installs seen since 00:00 UTC today, as of activeAsOf (refreshed hourly).",
   peakWeeklyActive:
     "The most distinct opted-in installs seen in any 7-day window ending on a UTC day since launch, today included: the largest of every complete day's weeklyActive and activeLast7d (the 7 days up to activeAsOf, refreshed hourly).",
+  downloads:
+    "Not telemetry: the download counts GitHub publishes for the EQBuddy Evolved releases (every non-draft release tagged v2.*, from v2.0.0 on 2026-09-28), read from GitHub's public API once an hour. Fetches of the installer and the portable zip, summed; the .sha256 checksum files are left out, because the in-app updater fetches one beside every installer it verifies. A re-download, an update and a bot all count, so this is downloads, not people. total is every such fetch since v2.0.0, as of asOf. last30d is the fetches in the 30 days up to asOf: equal to total while v2.0.0 is inside that window, then total minus the total recorded at the end of the UTC day the window starts after. Daily totals are recorded from the day this field was first published, and nothing earlier is estimated, so where that day has no recorded total last30d is null and last30dNote says the first day a figure will exist. A failed read keeps the previous total and its asOf; it never publishes 0. null before the first successful read.",
   installsAllTime:
     "Opted-in installs counted when first seen: each adds one the first time it sends a heartbeat. A lower bound, not total users: telemetry is off unless the player turns it on. It is a single running count, so no install id is kept to compute it; the raw heartbeats it is counted from are still deleted after 90 days. An install silent for more than 90 days, or one whose data was deleted, counts again if it comes back, and so does one that opts out and back in (a new id). Deleting an install's data does not lower it.",
 } as const;
@@ -450,6 +468,7 @@ export interface Metrics {
   activeAsOf: string;
   peakDailyActive: number;
   peakWeeklyActive: number;
+  downloads: Downloads | null;
   definitions: typeof DEFINITIONS;
 }
 
@@ -511,6 +530,7 @@ export async function computeMetrics(
     activeAsOf: iso(actives.asOfMs),
     peakDailyActive: peaks.peakDailyActive,
     peakWeeklyActive: peaks.peakWeeklyActive,
+    downloads: downloadsFrom(await readDownloadRows(db)),
     definitions: DEFINITIONS,
   };
 }
@@ -623,12 +643,22 @@ export async function readHistorySnapshot(db: D1Database): Promise<string | null
 /**
  * The whole cron pass, in dependency order. The rollup (which records each
  * day's usage) runs before the purge, and the two snapshots share one read of
- * the rollups.
+ * the rollups. `fetcher` reads GitHub's releases for the Evolved download
+ * total on the first tick of each UTC hour (src/downloads.ts); omitted, as in
+ * tests that do not mean to touch the network, no read is made. The read can
+ * never fail the pass: any failure leaves the previous total standing.
  */
-export async function runScheduled(db: D1Database, nowMs: number): Promise<void> {
+export async function runScheduled(db: D1Database, nowMs: number, fetcher?: typeof fetch): Promise<void> {
   await closeBuckets(db, nowMs);
   await writeDailyRollups(db, nowMs);
   await purgeExpired(db, nowMs);
+  if (fetcher && isDispatchTick(nowMs)) {
+    try {
+      await refreshDownloads(db, nowMs, fetcher);
+    } catch {
+      // Deliberately silent (no log line): the previous total stands.
+    }
+  }
   const rollups = await readRollups(db);
   await writeMetricsSnapshot(db, nowMs, rollups);
   await writeHistorySnapshot(db, nowMs, rollups);

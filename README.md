@@ -59,7 +59,10 @@ body is limited to 1 KiB. A refused body is not stored and not logged.
    catching up any day a missed run skipped;
 3. deletes raw heartbeats whose bucket started more than 90 days ago. This runs
    AFTER step 2, so a day is rolled up before its raw rows can go;
-4. rewrites `metrics.json` and `history.json` into their snapshot rows, from
+4. on the first tick of each UTC hour, reads the EQBuddy Evolved download
+   total from GitHub (see [Downloads](#downloads-not-telemetry)) and records it
+   as today's `downloads_daily` row;
+5. rewrites `metrics.json` and `history.json` into their snapshot rows, from
    one read of `daily_rollup`.
 
 Every step is idempotent, so running twice changes nothing and missing a run
@@ -71,9 +74,10 @@ loses nothing.
 creates it, `0002_daily_active.sql` adds one id-free count to
 `daily_rollup`, `0003_usage_history.sql` adds each day's usage to
 `daily_rollup` (backfilled from `bucket_count`) and creates the
-`history_snapshot` table, and `0004_installs_all_time.sql` creates the
-one-row `all_time_total` count (backfilled from `heartbeat`). Only `heartbeat`
-holds an install id:
+`history_snapshot` table, `0004_installs_all_time.sql` creates the
+one-row `all_time_total` count (backfilled from `heartbeat`), and
+`0005_downloads.sql` creates `downloads_daily`, which holds a number GitHub
+publishes and nothing from any install. Only `heartbeat` holds an install id:
 
 | Table | Columns | Kept |
 |---|---|---|
@@ -83,6 +87,7 @@ holds an install id:
 | `metrics_snapshot` | `id`, `generated_at`, `body` | One row, overwritten |
 | `history_snapshot` | `id`, `generated_at`, `body` | One row, overwritten |
 | `all_time_total` | `id`, `installs_first_seen` | One row, one integer, indefinitely (no ids). Only ever goes up |
+| `downloads_daily` | `day`, `total`, `as_of` | One row per UTC day, indefinitely. Not telemetry: GitHub's download count for the Evolved releases, the latest read that day |
 
 A heartbeat **upserts** one row per install per 10-minute bucket. The client
 sends every 5 minutes, so that is two writes against one row, and the table
@@ -111,14 +116,19 @@ A test pins every column of every table. Adding one fails the build.
   },
   "dailyActive": 41,
   "weeklyActive": 96,
-  "usageHours": { "yesterday": 61.5, "last7d": 402.33, "last30d": 1650.17, "allTime": 2214.33, "todaySoFar": 3.5 },
+  "usageHours": { "yesterday": 61.5, "last7d": 402.33, "last30d": 1650.17, "allTime": 2214.33, "todaySoFar": 3.5, "allTimeRounded": 2214 },
   "installsAllTime": 212,
   "activeLast24h": 48,
   "activeLast7d": 104,
   "activeAsOf": "2026-10-01T18:00:00Z",
   "peakDailyActive": 57,
   "peakWeeklyActive": 118,
-  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "activeLast24h": "…", "activeLast7d": "…", "activeAsOf": "…", "peakDailyActive": "…", "peakWeeklyActive": "…", "installsAllTime": "…" }
+  "downloads": {
+    "since": "2026-09-28", "sinceTag": "v2.0.0",
+    "total": 1339, "last30d": 1339, "last30dNote": null,
+    "asOf": "2026-10-02T12:00:00Z"
+  },
+  "definitions": { "concurrentNow": "…", "peakConcurrent": "…", "uniqueUsers30d": "…", "versionMix7d": "…", "dailyActive": "…", "weeklyActive": "…", "usageHours": "…", "activeLast24h": "…", "activeLast7d": "…", "activeAsOf": "…", "peakDailyActive": "…", "peakWeeklyActive": "…", "downloads": "…", "installsAllTime": "…" }
 }
 ```
 
@@ -130,13 +140,14 @@ A test pins every column of every table. Adding one fails the build.
 | `versionMix7d` | Among distinct ids in the 7 days up to the end of the last complete UTC day, the share on each version, counting each id once on its **latest** version | Daily |
 | `dailyActive` | Distinct ids with a heartbeat in the last complete UTC day (the 24 hours up to its end) | Daily |
 | `weeklyActive` | Distinct ids with a heartbeat in the 7 days up to the end of the last complete UTC day. The same set `versionMix7d` divides, so it always equals `versionMix7d.denominator` | Daily |
-| `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar` | Daily; `todaySoFar` and `allTime` every 10 minutes |
+| `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar`. `allTimeRounded` is `allTime` to the nearest whole hour, half up, for a badge (shields.io cannot round, and would print `3019.33`) | Daily; `todaySoFar`, `allTime` and `allTimeRounded` every 10 minutes |
 | `installsAllTime` | **Opted-in installs counted when first seen**, since launch: a lower bound, not total users. Each id adds one the first time it sends a heartbeat that finds no raw row for it. An install silent for more than 90 days, one whose data was deleted, and one that opted out and back in (a new id) each count again if they come back. `/delete` never lowers it | Every 10 minutes |
 | `activeLast24h` | Distinct ids with a heartbeat in the 24 hours up to `activeAsOf`. **Rolling**: it includes today, unlike `dailyActive`, which ends at the last complete UTC day | Hourly |
 | `activeLast7d` | Distinct ids with a heartbeat in the 7 days up to `activeAsOf`. **Rolling**: it includes today, unlike `weeklyActive`, which ends at the last complete UTC day | Hourly |
 | `activeAsOf` | When `activeLast24h`, `activeLast7d` and today's part of `peakDailyActive` were last counted: less than an hour before `generatedAt`. The passes in between repeat that count | Hourly |
 | `peakDailyActive` | The most distinct ids in any single UTC day since launch, **today included**: the largest of every complete day's `dailyActive` and the distinct ids seen since 00:00 UTC today (as of `activeAsOf`) | Hourly for today; daily for the days before |
 | `peakWeeklyActive` | The most distinct ids in any 7-day window ending on a UTC day since launch, **today included**: the largest of every complete day's `weeklyActive` and `activeLast7d` | Hourly for the rolling week; daily for the days before |
+| `downloads` | **Not telemetry.** Fetches of the EQBuddy Evolved installer and portable zip from GitHub, from v2.0.0 (2026-09-28). `total` since then, `last30d` in the 30 days up to `asOf` (or `null` with `last30dNote`). See [Downloads](#downloads-not-telemetry). `null` before the first successful read | Hourly |
 
 **Usage hours are computed on the server only**, from the id-free
 `bucket_count` table. The heartbeat payload did not change. The rollup writes
@@ -194,6 +205,47 @@ and leaves the count alone: the count is an aggregate, with nothing in it to
 delete. Migration `0004` backfilled it as `COUNT(DISTINCT install_id)` over the
 raw table. The Worker went live on 2026-09-24, so before 2026-12-23 no raw row
 had aged out, and that is every install seen since launch (less any deleted).
+
+### Downloads: not telemetry
+
+`downloads` is the one figure in `metrics.json` that does not come from a
+heartbeat. It exists for the EQBuddy README's *Downloads, last 30 days* row
+(DRA-783), which a shields.io badge cannot compute on its own: a badge over the
+GitHub API joins several numbers with commas rather than adding them, and
+cannot leave a file out.
+
+**This is the Worker's one outbound read.** On the first cron tick of each UTC
+hour it asks GitHub's public API for the EQBuddy releases
+(`GET api.github.com/repos/DranakCorps-bot/EQBuddy/releases?per_page=100`,
+unauthenticated: 24 requests a day against GitHub's 60 an hour) and sums the
+`download_count` GitHub publishes for each asset. It sends nothing about any
+install, and no token. Its only other outbound request is the landing refresh
+under [Deploying](#deploying).
+
+- **What counts:** every asset of every non-draft release whose tag starts
+  `v2.` (EQBuddy Evolved, from v2.0.0), **except** files ending `.sha256`. The
+  in-app updater fetches the `.sha256` beside every installer it verifies, so
+  counting those would count each in-app update twice. What is left is
+  fetches of the installer and the portable zip: a re-download, an update and
+  a bot all count, so it is downloads, not people.
+- **Pages:** GitHub lists releases newest first, 100 to a page, and there are
+  more than 100. The read follows `page=2`, `page=3`… until a page is short or
+  reaches a release created before 2026-09-28 (every later one is older), at
+  most 5 pages. It follows page numbers rather than the `Link` header because
+  the code reads no header of any kind (see
+  [Where logging is switched off](#where-logging-is-switched-off)). Running out
+  of pages first writes nothing rather than a partial sum.
+- **A failed read writes nothing.** A non-200 answer, a body that is not the
+  expected list, no v2 release, or a total of 0 leaves the previous total and
+  its `asOf` standing. It never publishes 0.
+- **The 30 days need history GitHub does not keep.** The API gives only
+  cumulative counts, so the cron records each UTC day's latest total in
+  `downloads_daily`, from the day this shipped. `last30d` is `total` while
+  v2.0.0 is itself inside the window (through 2026-10-27). After that it is
+  `total` minus the total recorded for the UTC day the window starts after,
+  and where that day has no row (from 2026-10-28 until 30 days of rows exist)
+  it is `null`, with `last30dNote` naming the first day a figure will exist.
+  Nothing earlier is back-filled or estimated.
 
 **Field names are stable.** The report widget reads `metrics.json` and
 `history.json`, and later the EQBuddy landing page will too. Fields are only
@@ -378,10 +430,12 @@ is written down here so the rule can be checked.
   row, then the upsert); the count's row is written only on an install's first
   heartbeat. Workers Free also allows only 50 D1 queries per
   invocation, so after a cron outage the daily rollup catches up at most 7
-  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`). A pass is at most 44 queries
+  days per pass (`MAX_ROLLUP_DAYS_PER_PASS`). A pass is at most 46 queries
   (`MAX_D1_QUERIES_PER_PASS`, pinned exactly by a test). It was 40 before the
   rolling actives and the peaks: they add the previous-snapshot read and the
-  three hourly scans, and a pass that reuses the scans is 3 fewer. The backlog
+  three hourly scans, and a pass that reuses the scans is 3 fewer. The
+  downloads add 2 (DRA-783): one read of `downloads_daily` every pass, and one
+  write on the hour's first tick when GitHub answered. The backlog
   drains over the next passes.
 - **The live scans read the most rows, so they run hourly.** A raw row is one
   install in one 10-minute bucket, and a scan reads every row in its window.
@@ -444,9 +498,15 @@ fixtures with known answers:
   24 hours), the hourly scan and the reuse between (which snapshot may stand
   in, and that a reused peak is only a floor), window edges to the
   millisecond, daily catch-up, the per-pass query count (exactly
-  `MAX_D1_QUERIES_PER_PASS` in the worst case, 3 fewer when reusing), the 90-day purge boundary,
+  `MAX_D1_QUERIES_PER_PASS` in the worst case, 3 fewer when reusing, 1 fewer off the hour), the 90-day purge boundary,
   aggregates that outlive the purge, the `metrics.json` shape and headers, and
   the storage-shape pin.
+- `test/worker/downloads.test.ts`: the Evolved download total (DRA-783):
+  `.sha256` files, v1 tags and drafts left out (the 2026-10-02 split, 1,339
+  counted and 430 `.sha256` left out); paging past 100 releases and stopping at
+  the first pre-2.0 one; every failed read keeping the previous total and never
+  writing 0; `last30d` inside the window, after it, and `null` with its note in
+  the gap; the hourly tick; and `usageHours.allTimeRounded` rounding half up.
 - `test/static/guards.test.ts`: no address read, no logging, platform logging
   off, no secrets tracked.
 
@@ -461,7 +521,8 @@ npx wrangler deploy
 ```
 
 **Upgrading a live deployment:** apply migrations **before** deploying code
-that reads the new tables. The heartbeat route writes `all_time_total`, so code
+that reads the new tables (`0005_downloads.sql` before the code that reads
+`downloads_daily`: every `metrics.json` build reads it). The heartbeat route writes `all_time_total`, so code
 deployed ahead of migration `0004` would fail every heartbeat. A heartbeat from
 a brand-new install that lands between the migration and the deploy is served
 by the old code and not counted. If that matters, run the backfill again right

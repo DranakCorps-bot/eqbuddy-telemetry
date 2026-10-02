@@ -82,8 +82,9 @@ describe("usageHours math", () => {
       last30d: 12, // (6 + 12 + 18 + 36) / 6
       allTime: 122, // 732 / 6
       todaySoFar: 0,
+      allTimeRounded: 122,
     });
-    expect(usageHoursFrom([])).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0 });
+    expect(usageHoursFrom([])).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0, allTimeRounded: 0 });
   });
 
   it("today's install-buckets are todaySoFar and join allTime, but no complete-day window (DRA-426)", () => {
@@ -94,9 +95,10 @@ describe("usageHours math", () => {
       last30d: 11,
       allTime: 12.83, // (66 + 11) / 6, summed in buckets before rounding
       todaySoFar: 1.83, // 11 / 6: the Founder's 18:20Z-20:00Z afternoon
+      allTimeRounded: 13,
     });
     // Before the first complete day, all time is today.
-    expect(usageHoursFrom([], 3)).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0.5, todaySoFar: 0.5 });
+    expect(usageHoursFrom([], 3)).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0.5, todaySoFar: 0.5, allTimeRounded: 1 });
   });
 
   it("the cron rolls each day's install-buckets into daily_rollup and metrics.json publishes the hours", async () => {
@@ -112,7 +114,7 @@ describe("usageHours math", () => {
     ]);
     const m = await computeMetrics(env.DB, oct3);
     // 00:05 on Oct 3: no Oct 3 bucket has closed yet.
-    expect(m.usageHours).toEqual({ yesterday: 0.5, last7d: 1.5, last30d: 1.5, allTime: 1.5, todaySoFar: 0 });
+    expect(m.usageHours).toEqual({ yesterday: 0.5, last7d: 1.5, last30d: 1.5, allTime: 1.5, todaySoFar: 0, allTimeRounded: 2 });
     expect(m.definitions.usageHours).toBe(DEFINITIONS.usageHours);
     expect(DEFINITIONS.usageHours).toMatch(/Estimated.*opted-in installs only.*10-minute resolution/);
   });
@@ -123,7 +125,7 @@ describe("usageHours math", () => {
     const noonOct2 = OCT1 + DAY + 12 * 60 * MIN;
     await runScheduled(env.DB, noonOct2);
     const m = await computeMetrics(env.DB, noonOct2);
-    expect(m.usageHours).toEqual({ yesterday: 1, last7d: 1, last30d: 1, allTime: 1.5, todaySoFar: 0.5 });
+    expect(m.usageHours).toEqual({ yesterday: 1, last7d: 1, last30d: 1, allTime: 1.5, todaySoFar: 0.5, allTimeRounded: 2 });
     // The cron's published snapshot says the same.
     const snap = await env.DB.prepare("SELECT body FROM metrics_snapshot WHERE id = 1").first<{ body: string }>();
     expect(JSON.parse(snap!.body).usageHours).toEqual(m.usageHours);
@@ -155,12 +157,13 @@ describe("usageHours math", () => {
       last30d: 0.33,
       allTime: 0.67, // 2 + 2 install-buckets
       todaySoFar: 0.33, // the 00:00 bucket's A and B, and nothing from Oct 1
+      allTimeRounded: 1,
     });
   });
 
   it("with no rows at all, todaySoFar and allTime are 0", async () => {
     const m = await computeMetrics(env.DB, OCT1 + 12 * 60 * MIN);
-    expect(m.usageHours).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0 });
+    expect(m.usageHours).toEqual({ yesterday: 0, last7d: 0, last30d: 0, allTime: 0, todaySoFar: 0, allTimeRounded: 0 });
   });
 
   it("todaySoFar costs ONE bounded query, against the id-free bucket_count, never heartbeat", async () => {
@@ -170,8 +173,9 @@ describe("usageHours math", () => {
     const bucketReads = sql.filter((q) => /FROM bucket_count WHERE bucket_start >= \?1/.test(q));
     expect(bucketReads).toHaveLength(1);
     expect(bucketReads[0]).not.toMatch(/\bheartbeat\b/);
-    // readRollups, peakConcurrent, todaySoFar, the three live scans, concurrentNow, installsAllTime.
-    expect(sql).toHaveLength(8);
+    // readRollups, peakConcurrent, todaySoFar, the three live scans, concurrentNow, installsAllTime,
+    // and the downloads rows (DRA-783).
+    expect(sql).toHaveLength(9);
   });
 
   it("defines todaySoFar, its closed-window rule and its staleness, and says allTime includes today", () => {
