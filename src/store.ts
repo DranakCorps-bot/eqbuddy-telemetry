@@ -722,14 +722,20 @@ export async function readHistorySnapshot(db: D1Database): Promise<string | null
  * total on the first tick of each UTC hour (src/downloads.ts); omitted, as in
  * tests that do not mean to touch the network, no read is made. The read can
  * never fail the pass: any failure leaves the previous total standing.
+ * `githubToken` (GITHUB_DISPATCH_TOKEN) authenticates that read when set.
  */
-export async function runScheduled(db: D1Database, nowMs: number, fetcher?: typeof fetch): Promise<void> {
+export async function runScheduled(
+  db: D1Database,
+  nowMs: number,
+  fetcher?: typeof fetch,
+  githubToken?: string,
+): Promise<void> {
   await closeBuckets(db, nowMs);
   await writeDailyRollups(db, nowMs);
   await purgeExpired(db, nowMs);
   if (fetcher && isDispatchTick(nowMs)) {
     try {
-      await refreshDownloads(db, nowMs, fetcher);
+      await refreshDownloads(db, nowMs, fetcher, githubToken);
     } catch {
       // Deliberately silent (no log line): the previous total stands.
     }

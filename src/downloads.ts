@@ -8,6 +8,16 @@
 // itself: a dynamic badge over the API joins several matches with commas
 // rather than adding them, and cannot leave the .sha256 files out.
 //
+// The read is authenticated with the Worker secret GITHUB_DISPATCH_TOKEN when it
+// is set (DRA-835). Unauthenticated, GitHub's 60 requests an hour are counted
+// per egress IP, and Workers leave from shared Cloudflare addresses, so the
+// budget was somebody else's: measured 2026-10-02, a 403 rate-limit with 0
+// remaining and no total ever written. The token is the one dispatch.ts already
+// sends to this host for this repository, so the read adds no new credential
+// and no new recipient. Without it the read goes out unauthenticated exactly
+// as before. The token is sent as a request header and nowhere else: never
+// logged, never in metrics.json, never in a return value.
+//
 // What is counted: assets of every non-draft release whose tag starts "v2."
 // (EQBuddy Evolved, from v2.0.0 on 2026-09-28), EXCEPT files ending ".sha256".
 // The in-app updater fetches the .sha256 beside every installer it verifies,
@@ -79,21 +89,25 @@ function reachedBeforeSince(page: unknown[]): boolean {
 /**
  * Reads every releases page down to the first release older than Evolved 2.0
  * and sums it. Pages are followed by number rather than by the Link header:
- * the code reads no header of any kind (test/static/guards.test.ts), and a
- * short page or the first pre-2.0 release ends the list either way.
+ * the code reads no RESPONSE header of any kind (test/static/guards.test.ts),
+ * and a short page or the first pre-2.0 release ends the list either way.
+ *
+ * `token` is GITHUB_DISPATCH_TOKEN: present and non-empty, it is sent as
+ * `Authorization: Bearer`; absent or empty, the request is unauthenticated.
+ * It is the only header that differs between the two.
  */
-export async function fetchEvolvedDownloads(fetcher: typeof fetch): Promise<number | null> {
+export async function fetchEvolvedDownloads(fetcher: typeof fetch, token?: string): Promise<number | null> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "eqbuddy-telemetry",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const releases: unknown[] = [];
   for (let page = 1; page <= MAX_RELEASE_PAGES; page++) {
     let body: unknown;
     try {
-      const response = await fetcher(`${RELEASES_URL}?per_page=${RELEASES_PER_PAGE}&page=${page}`, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-          "User-Agent": "eqbuddy-telemetry",
-        },
-      });
+      const response = await fetcher(`${RELEASES_URL}?per_page=${RELEASES_PER_PAGE}&page=${page}`, { headers });
       if (response.status !== 200) return null;
       body = await response.json();
     } catch {
@@ -141,8 +155,13 @@ export async function recordDownloads(db: D1Database, total: number, nowMs: numb
  * The fetch tick: read GitHub and, only if the read succeeded, write today's
  * row. Answers whether a row was written.
  */
-export async function refreshDownloads(db: D1Database, nowMs: number, fetcher: typeof fetch): Promise<boolean> {
-  const total = await fetchEvolvedDownloads(fetcher);
+export async function refreshDownloads(
+  db: D1Database,
+  nowMs: number,
+  fetcher: typeof fetch,
+  token?: string,
+): Promise<boolean> {
+  const total = await fetchEvolvedDownloads(fetcher, token);
   if (total === null) return false;
   await recordDownloads(db, total, nowMs);
   return true;

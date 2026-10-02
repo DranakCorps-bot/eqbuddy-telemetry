@@ -242,11 +242,21 @@ cannot leave a file out.
 
 **This is the Worker's one outbound read.** On the first cron tick of each UTC
 hour it asks GitHub's public API for the EQBuddy releases
-(`GET api.github.com/repos/DranakCorps-bot/EQBuddy/releases?per_page=100`,
-unauthenticated: 24 requests a day against GitHub's 60 an hour) and sums the
-`download_count` GitHub publishes for each asset. It sends nothing about any
-install, and no token. Its only other outbound request is the landing refresh
-under [Deploying](#deploying).
+(`GET api.github.com/repos/DranakCorps-bot/EQBuddy/releases?per_page=100`, 24
+requests a day) and sums the `download_count` GitHub publishes for each asset.
+It sends nothing about any install.
+
+**The read is authenticated with `GITHUB_DISPATCH_TOKEN`** (DRA-835), the
+secret the landing refresh already sends to the same host for the same
+repository, so it adds no new credential and no new recipient. Unauthenticated,
+GitHub's 60 requests an hour are counted per egress IP, and Workers leave from
+shared Cloudflare addresses: the first deploy was refused with a 403 rate limit
+and 0 remaining on its first read, and never wrote a total. With the secret
+absent the read goes out unauthenticated, exactly as before. The token rides in
+the `Authorization` header and nowhere else: it is never logged, never in
+`metrics.json`, and the request header set is pinned with and without it in
+`test/worker/downloads.test.ts`. Its only other outbound request is the landing
+refresh under [Deploying](#deploying).
 
 - **What counts:** every asset of every non-draft release whose tag starts
   `v2.` (EQBuddy Evolved, from v2.0.0), **except** files ending `.sha256`. The
@@ -573,7 +583,9 @@ hours in a row on launch day (`src/dispatch.ts`). The request carries nothing bu
 `{"ref":"main"}`. The token is a **fine-grained** GitHub token scoped to the one
 repository `DranakCorps-bot/EQBuddy`, with **Actions: Read and write** and nothing
 else. Without the secret the refresh is a silent no-op, and it can never fail the
-metrics pass. Set or rotate it with `npx wrangler secret put GITHUB_DISPATCH_TOKEN`,
+metrics pass. Since DRA-835 the same token also authenticates the hourly releases
+read (see [Downloads: not telemetry](#downloads-not-telemetry)); a fine-grained token reads a public repository's
+releases with no extra permission, and without it that read is unauthenticated. Set or rotate it with `npx wrangler secret put GITHUB_DISPATCH_TOKEN`,
 and paste the token at the prompt, never on the command line. The D1 id in
 `wrangler.jsonc` is useless without the account's own credentials. `.dev.vars`
 and `.env*` are ignored anyway, and a test fails if one is ever tracked.

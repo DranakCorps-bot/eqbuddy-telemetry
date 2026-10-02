@@ -37,6 +37,10 @@ export const FORBIDDEN_IN_SOURCE: ReadonlyArray<[string, RegExp]> = [
   ["X-Real-IP", /x-real-ip/i],
   ["True-Client-IP", /true-client-ip/i],
   ["request.cf (geo/ASN/colo metadata)", /\.cf\b/],
+  // A READ of a header, on a request or a response. It does not pin the headers the
+  // Worker SENDS: the releases read sends Authorization when GITHUB_DISPATCH_TOKEN is
+  // set (DRA-835), and that request header set is pinned exactly, with and without
+  // the token, in test/worker/downloads.test.ts.
   ["any header read", /headers\s*\.\s*get\s*\(/i],
 ];
 
