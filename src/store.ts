@@ -2,6 +2,7 @@
 // writes a request's address: the functions take a validated payload or a
 // clock, and that is all.
 
+import { OS_FAMILIES, type OsFamily, osFamily } from "./os";
 import type { Heartbeat } from "./validate";
 import { type Downloads, downloadsFrom, readDownloadRows, refreshDownloads } from "./downloads";
 import { isDispatchTick } from "./dispatch";
@@ -140,35 +141,84 @@ export interface VersionMix {
   versions: VersionShare[];
 }
 
+export interface OsShare {
+  family: OsFamily;
+  count: number;
+  share: number;
+}
+
+/** Every family, always, in OS_FAMILIES order: a family nobody is on reads 0, not absent. */
+export interface OsMix {
+  denominator: number;
+  families: OsShare[];
+}
+
+/** One day's two 7-day mixes. One query answers both, so they share a denominator. */
+export interface WeeklyMix {
+  versions: VersionMix;
+  os: OsMix;
+}
+
+function share(n: number, denominator: number): number {
+  return denominator > 0 ? Math.round((n / denominator) * 1000) / 1000 : 0;
+}
+
 /**
- * Among distinct ids seen in the 7 days up to `asOf`, the share on each
- * version, taking each id's LATEST version in the window. Largest first;
- * ties by version string so the output is deterministic.
+ * Among distinct ids seen in the 7 days up to `asOf`, the share on each version
+ * and on each OS family, both read off each id's LATEST row in the window: the
+ * same row, so an id is counted once in each mix and both denominators are the
+ * one distinct set weeklyActive publishes. Versions largest first, ties by
+ * version string so the output is deterministic; families in OS_FAMILIES order.
+ *
+ * One query, as versionMix alone was, so a rollup day still costs four.
  */
-export async function versionMix(db: D1Database, asOfMs: number): Promise<VersionMix> {
+export async function weeklyMix(db: D1Database, asOfMs: number): Promise<WeeklyMix> {
   const { results } = await db
     .prepare(
       `WITH latest AS (
-         SELECT app_version,
+         SELECT app_version, os,
                 ROW_NUMBER() OVER (PARTITION BY install_id ORDER BY last_seen_ms DESC) AS rn
          FROM heartbeat
          WHERE ${IN_WINDOW}
        )
-       SELECT app_version, COUNT(*) AS n FROM latest WHERE rn = 1
-       GROUP BY app_version
-       ORDER BY n DESC, app_version ASC`,
+       SELECT app_version, os, COUNT(*) AS n FROM latest WHERE rn = 1
+       GROUP BY app_version, os`,
     )
     .bind(...windowArgs(asOfMs - VERSION_WINDOW_MS, asOfMs))
-    .all<{ app_version: string; n: number }>();
+    .all<{ app_version: string; os: string; n: number }>();
   const denominator = results.reduce((sum, r) => sum + r.n, 0);
+
+  const byVersion = new Map<string, number>();
+  const byFamily = new Map<OsFamily, number>(OS_FAMILIES.map((f) => [f, 0]));
+  for (const r of results) {
+    byVersion.set(r.app_version, (byVersion.get(r.app_version) ?? 0) + r.n);
+    const f = osFamily(r.os);
+    byFamily.set(f, (byFamily.get(f) ?? 0) + r.n);
+  }
+  // Versions are printable ASCII (validate.ts), where code-unit order is SQLite's BINARY order.
+  const versions = [...byVersion]
+    .sort(([va, na], [vb, nb]) => nb - na || (va < vb ? -1 : va > vb ? 1 : 0))
+    .map(([appVersion, n]) => ({ appVersion, count: n, share: share(n, denominator) }));
   return {
-    denominator,
-    versions: results.map((r) => ({
-      appVersion: r.app_version,
-      count: r.n,
-      share: Math.round((r.n / denominator) * 1000) / 1000,
-    })),
+    versions: { denominator, versions },
+    os: {
+      denominator,
+      families: OS_FAMILIES.map((family) => {
+        const n = byFamily.get(family) ?? 0;
+        return { family, count: n, share: share(n, denominator) };
+      }),
+    },
   };
+}
+
+/** The version half of weeklyMix. */
+export async function versionMix(db: D1Database, asOfMs: number): Promise<VersionMix> {
+  return (await weeklyMix(db, asOfMs)).versions;
+}
+
+/** The OS half of weeklyMix. */
+export async function osMix(db: D1Database, asOfMs: number): Promise<OsMix> {
+  return (await weeklyMix(db, asOfMs)).os;
 }
 
 /** Distinct ids seen in the 24 hours up to `asOf`. The rollup asks it at a day's end. */
@@ -323,18 +373,19 @@ export async function writeDailyRollups(db: D1Database, nowMs: number): Promise<
   for (; dayMs < stop; dayMs += DAY_MS) {
     const endOfDay = dayMs + DAY_MS - 1;
     const unique = await uniqueUsers30d(db, endOfDay);
-    const mix = await versionMix(db, endOfDay);
+    // Both 7-day mixes come from one query (weeklyMix), so they cannot disagree.
+    const mix = await weeklyMix(db, endOfDay);
     const active = await dailyActive(db, endOfDay);
     // The day's usage is summed from its closed buckets inside the same
     // statement, so the pass still costs four queries a day. closeBuckets runs
     // first in the pass, so a completed day's last bucket is already closed.
     await db
       .prepare(
-        `INSERT OR IGNORE INTO daily_rollup (day, unique_30d, version_mix_7d, active_1d, usage_buckets_1d)
-         SELECT ?1, ?2, ?3, ?4, COALESCE(SUM(distinct_ids), 0)
+        `INSERT OR IGNORE INTO daily_rollup (day, unique_30d, version_mix_7d, active_1d, usage_buckets_1d, os_mix_7d)
+         SELECT ?1, ?2, ?3, ?4, COALESCE(SUM(distinct_ids), 0), ?7
          FROM bucket_count WHERE bucket_start >= ?5 AND bucket_start < ?6`,
       )
-      .bind(dayKey(dayMs), unique, JSON.stringify(mix), active, iso(dayMs), iso(dayMs + DAY_MS))
+      .bind(dayKey(dayMs), unique, JSON.stringify(mix.versions), active, iso(dayMs), iso(dayMs + DAY_MS), JSON.stringify(mix.os))
       .run();
   }
 }
@@ -346,6 +397,8 @@ export interface RollupRow {
   version_mix_7d: string;
   active_1d: number;
   usage_buckets_1d: number;
+  /** JSON of an OsMix; null on a row written before migration 0006. */
+  os_mix_7d: string | null;
 }
 
 /**
@@ -354,7 +407,7 @@ export interface RollupRow {
  */
 export async function readRollups(db: D1Database): Promise<RollupRow[]> {
   const { results } = await db
-    .prepare(`SELECT day, unique_30d, version_mix_7d, active_1d, usage_buckets_1d FROM daily_rollup ORDER BY day ASC`)
+    .prepare(`SELECT day, unique_30d, version_mix_7d, active_1d, usage_buckets_1d, os_mix_7d FROM daily_rollup ORDER BY day ASC`)
     .all<RollupRow>();
   return results;
 }
@@ -447,6 +500,8 @@ export const DEFINITIONS = {
     "The most distinct opted-in installs seen in any 7-day window ending on a UTC day since launch, today included: the largest of every complete day's weeklyActive and activeLast7d (the 7 days up to activeAsOf, refreshed hourly).",
   downloads:
     "Not telemetry: the download counts GitHub publishes for the EQBuddy Evolved releases (every non-draft release tagged v2.*, from v2.0.0 on 2026-09-28), read from GitHub's public API once an hour. Fetches of the installer and the portable zip, summed; the .sha256 checksum files are left out, because the in-app updater fetches one beside every installer it verifies. A re-download, an update and a bot all count, so this is downloads, not people. total is every such fetch since v2.0.0, as of asOf. last30d is the fetches in the 30 days up to asOf: equal to total while v2.0.0 is inside that window, then total minus the total recorded at the end of the UTC day the window starts after. Daily totals are recorded from the day this field was first published, and nothing earlier is estimated, so where that day has no recorded total last30d is null and last30dNote says the first day a figure will exist. A failed read keeps the previous total and its asOf; it never publishes 0. null before the first successful read.",
+  osMix7d:
+    "Share of the same distinct opted-in installs versionMix7d divides (the 7 days up to the end of the last complete UTC day) by operating-system family, each install counted once, on the OS it reported last. Families: windows, macos-wine, linux-wine, wine-other (Wine on any other host), and other (a value matching none of the forms EQBuddy sends). Wine is counted only where the app reports it: Wine that hides itself, and any install whose app does not report Wine, counts as windows. since is the first UTC day this was counted; the days before it have no OS figure. null until that first day is complete.",
   installsAllTime:
     "Opted-in installs counted when first seen: each adds one the first time it sends a heartbeat. A lower bound, not total users: telemetry is off unless the player turns it on. It is a single running count, so no install id is kept to compute it; the raw heartbeats it is counted from are still deleted after 90 days. An install silent for more than 90 days, or one whose data was deleted, counts again if it comes back, and so does one that opts out and back in (a new id). Deleting an install's data does not lower it.",
 } as const;
@@ -469,7 +524,26 @@ export interface Metrics {
   peakDailyActive: number;
   peakWeeklyActive: number;
   downloads: Downloads | null;
+  osMix7d: PublishedOsMix | null;
   definitions: typeof DEFINITIONS;
+}
+
+/** The latest day's OsMix, and the first day any rollup row carried one. */
+export interface PublishedOsMix extends OsMix {
+  since: string;
+}
+
+/**
+ * From the rollup rows already read: the latest row's OS mix, with the first
+ * day that has one. Rows written before migration 0006 have none, and they are
+ * never filled in, so `since` is where the figure starts. null while the latest
+ * row has none (no complete day since the column existed). No query.
+ */
+export function publishedOsMix(rows: readonly RollupRow[]): PublishedOsMix | null {
+  const latest = rows[rows.length - 1];
+  if (!latest?.os_mix_7d) return null;
+  const first = rows.find((r) => r.os_mix_7d);
+  return { since: first!.day, ...(JSON.parse(latest.os_mix_7d) as OsMix) };
 }
 
 /**
@@ -531,6 +605,7 @@ export async function computeMetrics(
     peakDailyActive: peaks.peakDailyActive,
     peakWeeklyActive: peaks.peakWeeklyActive,
     downloads: downloadsFrom(await readDownloadRows(db)),
+    osMix7d: publishedOsMix(rows),
     definitions: DEFINITIONS,
   };
 }

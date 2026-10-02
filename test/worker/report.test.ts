@@ -15,7 +15,7 @@ import {
   runScheduled,
   usageHoursFrom,
 } from "../../src/store";
-import { REPORT_HTML, WIDGET_CSS, WIDGET_JS } from "../../src/widget";
+import { REPORT_CHART_NAMES, REPORT_HTML, WIDGET_CSS, WIDGET_JS } from "../../src/widget";
 
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
@@ -55,7 +55,7 @@ function recording(): { db: D1Database; sql: string[] } {
 }
 
 function row(day: string, usage_buckets_1d: number): RollupRow {
-  return { day, unique_30d: 0, version_mix_7d: '{"denominator":0,"versions":[]}', active_1d: 0, usage_buckets_1d };
+  return { day, unique_30d: 0, version_mix_7d: '{"denominator":0,"versions":[]}', active_1d: 0, usage_buckets_1d, os_mix_7d: null };
 }
 
 describe("usageHours math", () => {
@@ -350,8 +350,10 @@ describe("the widget routes", () => {
     expect(html).toContain('<link rel="stylesheet" href="/widget.css">');
     // The report names its tiles: the defaults (rolling actives, all-time usage), each peak beside its rolling figure, and the all-time install count beside the 30-day one.
     expect(html).toContain(
-      '<div data-eqbuddy-telemetry data-tiles="concurrentNow peakConcurrent activeLast24h peakDailyActive activeLast7d peakWeeklyActive uniqueUsers30d installsAllTime usageHoursAllTime"></div>',
+      '<div data-eqbuddy-telemetry data-tiles="concurrentNow peakConcurrent activeLast24h peakDailyActive activeLast7d peakWeeklyActive uniqueUsers30d installsAllTime usageHoursAllTime" data-charts="actives concurrent usageHours versions os"></div>',
     );
+    // DRA-784: the OS mix is drawn beside the version mix.
+    expect(REPORT_CHART_NAMES.indexOf("os")).toBe(REPORT_CHART_NAMES.indexOf("versions") + 1);
     // Only the widget script, and no remote stylesheet, font, image or script.
     expect(html.match(/<script\b/g)).toHaveLength(1);
     expect(html).not.toMatch(/<(script|link|img|iframe)\b[^>]*(src|href)="(https?:)?\/\//i);

@@ -1,0 +1,12 @@
+-- osMix7d (DRA-784 D1): users by OS family over the trailing 7 days. No ids.
+--
+-- daily_rollup.os_mix_7d: JSON of the per-day OS mix (src/store.ts OsMix),
+-- written by the daily rollup beside version_mix_7d from the SAME query, so its
+-- denominator is weeklyActive's by construction. It is a share of an existing
+-- payload field, `os`: no new field is sent and no raw value is kept here, only
+-- counts per family.
+--
+-- Deliberately NULLABLE and NOT backfilled: a row written before this column
+-- has no OS figure, and metrics.json says from which day the figure exists
+-- (osMix7d.since) rather than inventing the days before it.
+ALTER TABLE daily_rollup ADD COLUMN os_mix_7d TEXT;

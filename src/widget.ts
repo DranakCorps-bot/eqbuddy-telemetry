@@ -40,8 +40,17 @@ export const REPORT_TILE_NAMES = [
   "concurrentNow", "peakConcurrent", "activeLast24h", "peakDailyActive", "activeLast7d", "peakWeeklyActive",
   "uniqueUsers30d", "installsAllTime", "usageHoursAllTime",
 ] as const;
-/** Chart names, in default order. Selectable with data-charts or options.charts. */
-export const CHART_NAMES = ["actives", "concurrent", "usageHours", "versions"] as const;
+/**
+ * Every chart name, selectable with data-charts or options.charts; "all" is this
+ * list. Appended only, like the tiles. "os" (DRA-784) is NOT a default: an embed
+ * that never named its charts keeps the four it always drew, and /report names
+ * all five.
+ */
+export const CHART_NAMES = ["actives", "concurrent", "usageHours", "versions", "os"] as const;
+/** The charts an embed with no data-charts shows, in order. */
+export const DEFAULT_CHART_NAMES = ["actives", "concurrent", "usageHours", "versions"] as const;
+/** The charts /report shows, in order: the OS mix beside the version mix. */
+export const REPORT_CHART_NAMES = ["actives", "concurrent", "usageHours", "versions", "os"] as const;
 
 export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public, id-free aggregates only.
    Embed: see https://github.com/DranakCorps-bot/eqbuddy-telemetry#embedding-the-widget */
@@ -51,12 +60,22 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   var TILES = ["concurrentNow", "peakConcurrent", "dailyActive", "weeklyActive", "uniqueUsers30d", "usageHours", "installsAllTime",
     "activeLast24h", "activeLast7d", "usageHoursAllTime", "peakDailyActive", "peakWeeklyActive"];
   var DEFAULT_TILES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "usageHoursAllTime"];
-  var CHARTS = ["actives", "concurrent", "usageHours", "versions"];
+  var CHARTS = ["actives", "concurrent", "usageHours", "versions", "os"];
+  var DEFAULT_CHARTS = ["actives", "concurrent", "usageHours", "versions"];
   var OPT_IN_LABEL = "Opted-in installs only: a lower bound, not total users.";
   var USAGE_LABEL = "estimated, opted-in installs only, 10-minute resolution";
   var USAGE_WINDOW = "7 days, yesterday and 30 days are complete UTC days, so today is not in them. Today so far and all time include today, up to about 20 minutes behind.";
   var USAGE_WINDOW_ALL = "All time and today so far include today, up to about 20 minutes behind. Full days are complete UTC days, so today is not in them.";
   var COLLECTING = "collecting data";
+  /** The limit of the OS mix, said wherever it is drawn (DRA-784 plan section 2). */
+  var OS_CAVEAT = "Wine is counted only where the app reports it: Wine that hides itself, and any install whose app does not report Wine, counts as Windows.";
+  var OS_LABELS = {
+    windows: "Windows",
+    "macos-wine": "macOS (Wine)",
+    "linux-wine": "Linux (Wine)",
+    "wine-other": "Wine, other host",
+    other: "Other"
+  };
   var BUCKET_MS = 600000;
   var DAY_MS = 86400000;
   var W = 1000;
@@ -92,7 +111,8 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     actives: "Daily and weekly active installs",
     concurrent: "Concurrent installs per 10 minutes, last 7 days",
     usageHours: "Usage hours per day",
-    versions: "Version mix, last 7 days"
+    versions: "Version mix, last 7 days",
+    os: "Users by OS, last 7 days"
   };
 
   function esc(v) {
@@ -304,6 +324,16 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     return html + "</tbody></table></details>";
   }
 
+  /** One labelled share bar, as the version and OS mixes draw them. */
+  function shareRow(label, count, share) {
+    var pct = Math.round(share * 1000) / 10;
+    return '<div class="eqbt-vrow" role="listitem"><span class="eqbt-vlabel">' + esc(label) + "</span>" +
+      '<svg class="eqbt-vbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">' +
+      '<rect class="eqbt-vtrack" x="0" y="0" width="100" height="10"/>' +
+      '<rect class="eqbt-bar" x="0" y="0" width="' + Math.max(0, Math.min(100, pct)) + '" height="10"/></svg>' +
+      '<span class="eqbt-vval">' + esc(pct + "% (" + num(count) + ")") + "</span></div>";
+  }
+
   // ---- charts ----
 
   function chart(name, m, h, loading) {
@@ -380,17 +410,26 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
           shown.push(other);
         }
         body = '<div class="eqbt-versions" role="list">';
-        for (var s = 0; s < shown.length; s++) {
-          var pct = Math.round(shown[s].share * 1000) / 10;
-          body += '<div class="eqbt-vrow" role="listitem"><span class="eqbt-vlabel">' + esc(shown[s].appVersion) + "</span>" +
-            '<svg class="eqbt-vbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">' +
-            '<rect class="eqbt-vtrack" x="0" y="0" width="100" height="10"/>' +
-            '<rect class="eqbt-bar" x="0" y="0" width="' + Math.max(0, Math.min(100, pct)) + '" height="10"/></svg>' +
-            '<span class="eqbt-vval">' + esc(pct + "% (" + num(shown[s].count) + ")") + "</span></div>";
-        }
+        for (var s = 0; s < shown.length; s++) body += shareRow(shown[s].appVersion, shown[s].count, shown[s].share);
         body += "</div>";
         note = "Opted-in installs only. Of " + num(mix.denominator) + " installs seen in the 7 days to the last complete UTC day, each on its latest version.";
         ready = true;
+      }
+    } else if (name === "os") {
+      // A snapshot from before osMix7d existed, or before its first day completes, has none: collecting.
+      var om = m && m.osMix7d;
+      if (om && om.denominator > 0 && om.families && om.families.length) {
+        body = '<div class="eqbt-versions" role="list">';
+        for (var f = 0; f < om.families.length; f++) {
+          var fam = om.families[f];
+          body += shareRow(OS_LABELS.hasOwnProperty(fam.family) ? OS_LABELS[fam.family] : fam.family, fam.count, fam.share);
+        }
+        body += "</div>";
+        note = "Opted-in installs only. Of " + num(om.denominator) + " installs seen in the 7 days to the last complete UTC day, each on the OS it reported last" +
+          (om.since ? ", counted from " + shortDay(om.since) + " on" : "") + ". " + OS_CAVEAT;
+        ready = true;
+      } else {
+        note = "Opted-in installs only. " + OS_CAVEAT;
       }
     }
     if (!body) body = collectingBox(false);
@@ -407,7 +446,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   function render(m, h, options, loading) {
     options = options || {};
     var tiles = select(options.tiles, TILES, DEFAULT_TILES);
-    var charts = select(options.charts, CHARTS);
+    var charts = select(options.charts, CHARTS, DEFAULT_CHARTS);
     var html = '<div class="eqbt" data-eqbt-version="1"><p class="eqbt-optin">' + esc(OPT_IN_LABEL) + "</p>";
     if (tiles.length) {
       html += '<div class="eqbt-tiles">';
@@ -510,6 +549,8 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     TILES: TILES.slice(),
     DEFAULT_TILES: DEFAULT_TILES.slice(),
     CHARTS: CHARTS.slice(),
+    DEFAULT_CHARTS: DEFAULT_CHARTS.slice(),
+    OS_CAVEAT: OS_CAVEAT,
     OPT_IN_LABEL: OPT_IN_LABEL,
     USAGE_LABEL: USAGE_LABEL,
     USAGE_WINDOW: USAGE_WINDOW,
@@ -657,7 +698,7 @@ export const REPORT_HTML = `<!doctype html>
 <p class="intro">Public counts from EQBuddy Evolved's opt-in heartbeat. Telemetry is off unless a player turns it on, so every figure is a lower bound.
 Raw figures: <a href="/metrics.json">metrics.json</a> and <a href="/history.json">history.json</a>.
 <a href="https://github.com/DranakCorps-bot/eqbuddy-telemetry">What is collected and how it is counted</a>.</p>
-<div data-eqbuddy-telemetry data-tiles="${REPORT_TILE_NAMES.join(" ")}"></div>
+<div data-eqbuddy-telemetry data-tiles="${REPORT_TILE_NAMES.join(" ")}" data-charts="${REPORT_CHART_NAMES.join(" ")}"></div>
 <noscript><p class="intro">The report draws its tiles and charts with JavaScript. The same figures are in metrics.json and history.json above.</p></noscript>
 </main>
 <script src="/widget.js"></script>
