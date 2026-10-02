@@ -298,6 +298,7 @@ describe("usageHours.allTimeRounded", () => {
       version_mix_7d: '{"denominator":0,"versions":[]}',
       active_1d: 0,
       usage_buckets_1d,
+      os_mix_7d: null,
     });
     // 3 install-buckets are 0.5 h: exactly half, so up.
     expect(usageHoursFrom([row("2026-10-01", 3)]).allTimeRounded).toBe(1);
