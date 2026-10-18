@@ -22,9 +22,10 @@ The requirement this implements is `docs/v2/telemetry.md` in the
 That page wins any disagreement with this README.
 
 > **Status: deployed 2026-09-24** (Cloudflare free tier) at
-> `https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev`. No released
-> EQBuddy build carries that host yet, so no player sends to it yet, and
-> from v2.0.6 telemetry is on unless a player turns it off. See [Deploying](#deploying).
+> `https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev`. Released
+> EQBuddy Evolved builds send to that host while telemetry is on: before
+> v2.0.6 only after a player opted in, and from v2.0.6 by default unless a
+> player turns it off. See [Deploying](#deploying).
 
 ## What it does
 
