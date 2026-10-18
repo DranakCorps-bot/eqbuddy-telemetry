@@ -12,6 +12,7 @@ interface Api {
   DEFAULT_TILES: string[];
   CHARTS: string[];
   OPT_IN_LABEL: string;
+  CUTOVER_LABEL: string;
   USAGE_LABEL: string;
   select(value: unknown, all: string[], defaults?: string[]): string[];
   render(m: unknown, h: unknown, options?: { tiles?: unknown; charts?: unknown }, loading?: boolean): string;
@@ -114,6 +115,9 @@ function tileState(html: string, name: string): string | undefined {
   return html.match(new RegExp(`data-tile="${name}" data-state="(\\w+)"`))?.[1];
 }
 
+const CUTOVER =
+  "Cutover: telemetry is on by default from v2.0.6. Earlier figures counted opted-in installs only, so the rise after that release is a change in what is counted, not growth.";
+
 describe("the widget module", () => {
   it("publishes its API on window with the documented tile and chart names", () => {
     const api = load();
@@ -121,7 +125,15 @@ describe("the widget module", () => {
     expect(api.TILES).toEqual([...TILE_NAMES]);
     expect(api.DEFAULT_TILES).toEqual([...DEFAULT_TILE_NAMES]);
     expect(api.CHARTS).toEqual([...CHART_NAMES]);
-    expect(api.USAGE_LABEL).toBe("estimated, opted-in installs only, 10-minute resolution");
+    expect(api.USAGE_LABEL).toBe("estimated, installs with telemetry on only, 10-minute resolution");
+  });
+
+  it("says installs with telemetry on, and marks the v2.0.6 cutover (DRA-1987)", () => {
+    const api = load();
+    expect(api.CUTOVER_LABEL).toBe(CUTOVER);
+    expect(api.OPT_IN_LABEL).toBe("Installs with telemetry on only: a lower bound, not total users.");
+    // "opted-in" survives only inside the cutover sentence, which is about the figures before v2.0.6.
+    expect(WIDGET_JS.split(CUTOVER).join("")).not.toMatch(/opted-in|opt-in/i);
   });
 
   it("depends on nothing: no import, no remote URL fetched, no header or console use", () => {
@@ -149,9 +161,10 @@ describe("rendering", () => {
     const html = load().render(METRICS, HISTORY);
     expect(attrValues(html, "data-tile")).toEqual([...DEFAULT_TILE_NAMES]);
     expect(attrValues(html, "data-chart")).toEqual([...DEFAULT_CHART_NAMES]);
-    expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
+    expect(html).toContain("Installs with telemetry on only: a lower bound, not total users.");
+    expect(html).toContain(CUTOVER);
     // The usage tile and the usage chart each carry the exact label.
-    expect(html.split("estimated, opted-in installs only, 10-minute resolution")).toHaveLength(3);
+    expect(html.split("estimated, installs with telemetry on only, 10-minute resolution")).toHaveLength(3);
     for (const name of DEFAULT_TILE_NAMES) expect(tileState(html, name), name).toBe("ready");
     expect(attrValues(html, "data-state").filter((s) => s !== "ready")).toEqual([]);
   });
@@ -210,7 +223,8 @@ describe("selecting a subset", () => {
     const html = load().render(METRICS, HISTORY, { tiles: "none", charts: "none" });
     expect(attrValues(html, "data-tile")).toEqual([]);
     expect(attrValues(html, "data-chart")).toEqual([]);
-    expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
+    expect(html).toContain("Installs with telemetry on only: a lower bound, not total users.");
+    expect(html).toContain(CUTOVER);
   });
 });
 
@@ -221,7 +235,8 @@ describe("empty and thin data", () => {
     for (const name of DEFAULT_CHART_NAMES) expect(html, name).toContain(`data-chart="${name}" data-state="collecting"`);
     expect(html).toContain("collecting data");
     expect(html).not.toMatch(/eqbt-tile-value">0</);
-    expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
+    expect(html).toContain("Installs with telemetry on only: a lower bound, not total users.");
+    expect(html).toContain(CUTOVER);
   });
 
   it("a non-zero figure before the first complete day is shown as it is", () => {
@@ -290,7 +305,8 @@ describe("the all-time installs tile", () => {
     expect(html).toContain("Total installs (all time)");
     expect(html).toContain(">1,512<");
     expect(html).toContain(METRICS.definitions.installsAllTime);
-    expect(html).toContain("Opted-in installs only: a lower bound, not total users.");
+    expect(html).toContain("Installs with telemetry on only: a lower bound, not total users.");
+    expect(html).toContain(CUTOVER);
   });
 
   it("a snapshot published before installsAllTime existed reads 'collecting data', never 0", () => {
@@ -357,7 +373,7 @@ describe("rolling actives and the all-time usage headline (launch day, 2026-09-2
     expect(html).toContain('<div class="eqbt-tile-sub">Today so far 11 h · last 7 full days 3.2 · last 30 full days 3.2</div>');
     expect(api.USAGE_WINDOW_ALL).toMatch(/All time and today so far include today/);
     expect(api.USAGE_WINDOW_ALL).toMatch(/Full days are complete UTC days, so today is not in them/);
-    expect(html).toContain("estimated, opted-in installs only, 10-minute resolution. " + api.USAGE_WINDOW_ALL);
+    expect(html).toContain("estimated, installs with telemetry on only, 10-minute resolution. " + api.USAGE_WINDOW_ALL);
     expect(html).toContain(METRICS.definitions.usageHours);
   });
 
@@ -520,7 +536,8 @@ describe("mounting into a container", () => {
     const el = new FakeElement({ "data-base": "https://down.example" });
     await api.mount(el, { fetch: () => Promise.reject(new Error("offline")) });
     expect(tileState(el.innerHTML, "activeLast24h")).toBe("collecting");
-    expect(el.innerHTML).toContain("Opted-in installs only: a lower bound, not total users.");
+    expect(el.innerHTML).toContain("Installs with telemetry on only: a lower bound, not total users.");
+    expect(el.innerHTML).toContain(CUTOVER);
   });
 
   it("auto-mounts every [data-eqbuddy-telemetry] element, defaulting the base to where the script came from", async () => {

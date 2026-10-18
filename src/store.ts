@@ -476,34 +476,34 @@ export function usageHoursFrom(rows: readonly RollupRow[], todayBuckets = 0): Us
 
 /** The public definitions, published beside the numbers (TEL-003). */
 export const DEFINITIONS = {
-  concurrentNow: "Distinct opted-in installs that sent a heartbeat in the last 10 minutes.",
-  peakConcurrent: "The most distinct opted-in installs in any single 10-minute window.",
+  concurrentNow: "Distinct installs with telemetry on that sent a heartbeat in the last 10 minutes.",
+  peakConcurrent: "The most distinct installs with telemetry on in any single 10-minute window.",
   uniqueUsers30d:
-    "Distinct opted-in installs in the 30 days up to the end of the last complete UTC day. An install, not a person; telemetry is off unless the player turns it on.",
+    "Distinct installs with telemetry on in the 30 days up to the end of the last complete UTC day. An install, not a person; installs with telemetry off are not counted. Telemetry is on by default from v2.0.6; earlier figures counted opted-in installs only, so the rise after that release is a change in what is counted, not growth.",
   versionMix7d:
-    "Share of the distinct opted-in installs in the 7 days up to the end of the last complete UTC day on each version (each install counted once, on its latest version).",
+    "Share of the distinct installs with telemetry on in the 7 days up to the end of the last complete UTC day on each version (each install counted once, on its latest version).",
   dailyActive:
-    "Distinct opted-in installs that sent a heartbeat in the last complete UTC day (the 24 hours up to its end).",
+    "Distinct installs with telemetry on that sent a heartbeat in the last complete UTC day (the 24 hours up to its end).",
   weeklyActive:
-    "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
+    "Distinct installs with telemetry on that sent a heartbeat in the 7 days up to the end of the last complete UTC day. The same installs versionMix7d divides among versions.",
   usageHours:
-    "Estimated hours of use by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar. allTimeRounded is allTime to the nearest whole hour (half up), for a badge that cannot round.",
+    "Estimated hours of use by installs with telemetry on only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes. yesterday is the last complete UTC day; last7d and last30d are the 7 and 30 UTC days ending with it, so none of the three includes today. todaySoFar is the current UTC day's closed 10-minute windows only: the window in progress is not counted yet, and the figure is refreshed every 10 minutes and cached for up to 10 more, so it can run about 20 minutes behind. allTime is every complete UTC day since launch plus todaySoFar. allTimeRounded is allTime to the nearest whole hour (half up), for a badge that cannot round.",
   activeLast24h:
-    "Distinct opted-in installs that sent a heartbeat in the 24 hours up to activeAsOf. A rolling window that includes today, unlike dailyActive, which ends at the last complete UTC day. Refreshed hourly, not every 10 minutes: activeAsOf is less than an hour before generatedAt.",
+    "Distinct installs with telemetry on that sent a heartbeat in the 24 hours up to activeAsOf. A rolling window that includes today, unlike dailyActive, which ends at the last complete UTC day. Refreshed hourly, not every 10 minutes: activeAsOf is less than an hour before generatedAt.",
   activeLast7d:
-    "Distinct opted-in installs that sent a heartbeat in the 7 days up to activeAsOf. A rolling window that includes today, unlike weeklyActive, which ends at the last complete UTC day. Refreshed hourly, not every 10 minutes: activeAsOf is less than an hour before generatedAt.",
+    "Distinct installs with telemetry on that sent a heartbeat in the 7 days up to activeAsOf. A rolling window that includes today, unlike weeklyActive, which ends at the last complete UTC day. Refreshed hourly, not every 10 minutes: activeAsOf is less than an hour before generatedAt.",
   activeAsOf:
     "When activeLast24h, activeLast7d and the today part of peakDailyActive were last counted. They read every raw heartbeat in their windows, so they are counted once an hour and the figures in between repeat the last count.",
   peakDailyActive:
-    "The most distinct opted-in installs seen in any single UTC day since launch, today included: the largest of every complete day's dailyActive and the distinct installs seen since 00:00 UTC today, as of activeAsOf (refreshed hourly).",
+    "The most distinct installs with telemetry on seen in any single UTC day since launch, today included: the largest of every complete day's dailyActive and the distinct installs seen since 00:00 UTC today, as of activeAsOf (refreshed hourly).",
   peakWeeklyActive:
-    "The most distinct opted-in installs seen in any 7-day window ending on a UTC day since launch, today included: the largest of every complete day's weeklyActive and activeLast7d (the 7 days up to activeAsOf, refreshed hourly).",
+    "The most distinct installs with telemetry on seen in any 7-day window ending on a UTC day since launch, today included: the largest of every complete day's weeklyActive and activeLast7d (the 7 days up to activeAsOf, refreshed hourly).",
   downloads:
     "Not telemetry: the download counts GitHub publishes for the EQBuddy Evolved releases (every non-draft release tagged v2.*, from v2.0.0 on 2026-09-28), read from GitHub's public API once an hour. Fetches of the installer and the portable zip, summed; the .sha256 checksum files are left out, because the in-app updater fetches one beside every installer it verifies. A re-download, an update and a bot all count, so this is downloads, not people. total is every such fetch since v2.0.0, as of asOf. last30d is the fetches in the 30 days up to asOf: equal to total while v2.0.0 is inside that window, then total minus the total recorded at the end of the UTC day the window starts after. Daily totals are recorded from the day this field was first published, and nothing earlier is estimated, so where that day has no recorded total last30d is null and last30dNote says the first day a figure will exist. A failed read keeps the previous total and its asOf; it never publishes 0. null before the first successful read.",
   osMix7d:
-    "Share of the same distinct opted-in installs versionMix7d divides (the 7 days up to the end of the last complete UTC day) by operating-system family, each install counted once, on the OS it reported last. Families: windows, macos-wine, linux-wine, wine-other (Wine on any other host), and other (a value matching none of the forms EQBuddy sends). Wine is counted only where the app reports it: Wine that hides itself, and any install whose app does not report Wine, counts as windows. since is the first UTC day this was counted; the days before it have no OS figure. null until that first day is complete.",
+    "Share of the same distinct installs with telemetry on versionMix7d divides (the 7 days up to the end of the last complete UTC day) by operating-system family, each install counted once, on the OS it reported last. Families: windows, macos-wine, linux-wine, wine-other (Wine on any other host), and other (a value matching none of the forms EQBuddy sends). Wine is counted only where the app reports it: Wine that hides itself, and any install whose app does not report Wine, counts as windows. since is the first UTC day this was counted; the days before it have no OS figure. null until that first day is complete.",
   installsAllTime:
-    "Opted-in installs counted when first seen: each adds one the first time it sends a heartbeat. A lower bound, not total users: telemetry is off unless the player turns it on. It is a single running count, so no install id is kept to compute it; the raw heartbeats it is counted from are still deleted after 90 days. An install silent for more than 90 days, or one whose data was deleted, counts again if it comes back, and so does one that opts out and back in (a new id). Deleting an install's data does not lower it.",
+    "Installs with telemetry on, counted when first seen: each adds one the first time it sends a heartbeat. A lower bound, not total users: installs with telemetry off are not counted. Telemetry is on by default from v2.0.6; earlier figures counted opted-in installs only, so the rise after that release is a change in what is counted, not growth. It is a single running count, so no install id is kept to compute it; the raw heartbeats it is counted from are still deleted after 90 days. An install silent for more than 90 days, or one whose data was deleted, counts again if it comes back, and so does one that turns telemetry off and back on (a new id). Deleting an install's data does not lower it.",
 } as const;
 
 export interface Metrics {
@@ -638,18 +638,18 @@ export const HISTORY_BUCKET_WINDOW_MS = 7 * DAY_MS;
 /** The public definitions of history.json's fields (TEL-003), beside the data. */
 export const HISTORY_DEFINITIONS = {
   days:
-    "One entry per complete UTC day since launch, oldest first. Each figure is as of the end of that day, exactly as metrics.json published it then.",
+    "One entry per complete UTC day since launch, oldest first. Each figure is as of the end of that day, exactly as metrics.json published it then. Telemetry is on by default from v2.0.6; earlier figures counted opted-in installs only, so the rise after that release is a change in what is counted, not growth.",
   day: "The UTC day, YYYY-MM-DD.",
-  dailyActive: "Distinct opted-in installs that sent a heartbeat in that UTC day.",
-  weeklyActive: "Distinct opted-in installs that sent a heartbeat in the 7 days up to the end of that UTC day.",
-  uniqueUsers30d: "Distinct opted-in installs in the 30 days up to the end of that UTC day. An install, not a person.",
+  dailyActive: "Distinct installs with telemetry on that sent a heartbeat in that UTC day.",
+  weeklyActive: "Distinct installs with telemetry on that sent a heartbeat in the 7 days up to the end of that UTC day.",
+  uniqueUsers30d: "Distinct installs with telemetry on in the 30 days up to the end of that UTC day. An install, not a person.",
   usageHours:
-    "Estimated hours of use that UTC day by opted-in installs only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes.",
+    "Estimated hours of use that UTC day by installs with telemetry on only, at 10-minute resolution: each distinct install seen in a 10-minute window counts as 10 minutes.",
   versionMix7d: "The metrics.json versionMix7d object as of the end of that UTC day.",
   concurrent10m:
-    "Distinct opted-in installs in each closed 10-minute UTC window of the last 7 days, oldest first. A window nobody was seen in has no entry and means 0.",
+    "Distinct installs with telemetry on in each closed 10-minute UTC window of the last 7 days, oldest first. A window nobody was seen in has no entry and means 0.",
   bucket: "The window's start, ISO-8601 UTC.",
-  count: "Distinct opted-in installs seen in that window.",
+  count: "Distinct installs with telemetry on seen in that window.",
 } as const;
 
 export interface HistoryDay {

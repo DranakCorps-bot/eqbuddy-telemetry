@@ -184,7 +184,7 @@ describe("the rollup writes it and metrics.json publishes it", () => {
   });
 
   it("defines it beside the number: the shared denominator, the families, the Wine limit and since", () => {
-    expect(DEFINITIONS.osMix7d).toMatch(/same distinct opted-in installs versionMix7d divides/);
+    expect(DEFINITIONS.osMix7d).toMatch(/same distinct installs with telemetry on versionMix7d divides/);
     expect(DEFINITIONS.osMix7d).toMatch(/on the OS it reported last/);
     expect(DEFINITIONS.osMix7d).toMatch(/windows, macos-wine, linux-wine, wine-other/);
     expect(DEFINITIONS.osMix7d).toMatch(/Wine that hides itself, and any install whose app does not report Wine, counts as windows/);

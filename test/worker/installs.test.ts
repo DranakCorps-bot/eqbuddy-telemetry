@@ -201,10 +201,11 @@ describe("installsAllTime in metrics.json", () => {
     expect(sql[0]).not.toMatch(/\bheartbeat\b/);
   });
 
-  it("is defined: first seen, opted-in only, a lower bound, no ids kept, counted again after 90 days, never lowered by a delete", () => {
+  it("is defined: first seen, installs with telemetry on only, the v2.0.6 cutover, a lower bound, no ids kept, counted again after 90 days, never lowered by a delete", () => {
     const d = DEFINITIONS.installsAllTime;
     expect(d).toMatch(/counted when first seen/);
-    expect(d).toMatch(/Opted-in installs/);
+    expect(d).toMatch(/^Installs with telemetry on/);
+    expect(d).toMatch(/on by default from v2\.0\.6.*not growth/);
     expect(d).toMatch(/A lower bound/);
     expect(d).toMatch(/no install id is kept to compute it/);
     expect(d).toMatch(/silent for more than 90 days.*counts again/);
