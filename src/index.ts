@@ -1,4 +1,4 @@
-// EQBuddy Evolved opt-in telemetry backend.
+// EQBuddy Evolved telemetry backend.
 //
 // Contract: EQBuddy docs/v2/telemetry.md §2–§6. Two POST routes, the public
 // GET routes (metrics, history and the report widget, DRA-380) and a cron.

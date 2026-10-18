@@ -1,12 +1,14 @@
 # eqbuddy-telemetry
 
-The backend for **EQBuddy Evolved's opt-in heartbeat**. It is public so you can
+The backend for **EQBuddy Evolved's telemetry heartbeat**. It is public so you can
 read exactly what it stores instead of taking our word for it.
 
-- **Off unless you turn it on.** EQBuddy sends nothing until you say yes.
+- **On by default from v2.0.6, off with one switch** (Options → Behavior →
+  Help improve EQBuddy). Before v2.0.6 EQBuddy sent nothing until you said yes,
+  and anyone who said "Not now" or turned it off on an earlier build stays off.
   EQBuddy 1.x and the legacy builds never send anything.
-- **Three fields, and nothing else.** A random install id minted when you
-  opted in, the app version, and your Windows version.
+- **Three fields, and nothing else.** A random install id minted the
+  first time telemetry is on, the app version, and your Windows version.
 - **Your IP address is never stored and never logged.** It reaches Cloudflare
   because that is how the internet works. This code never reads it, and the
   database has nowhere to put it.
@@ -22,7 +24,7 @@ That page wins any disagreement with this README.
 > **Status: deployed 2026-09-24** (Cloudflare free tier) at
 > `https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev`. No released
 > EQBuddy build carries that host yet, so no player sends to it yet, and
-> telemetry stays off unless a player turns it on. See [Deploying](#deploying).
+> from v2.0.6 telemetry is on unless a player turns it off. See [Deploying](#deploying).
 
 ## What it does
 
@@ -153,8 +155,8 @@ A test pins every column of every table. Adding one fails the build.
 | `versionMix7d` | Among distinct ids in the 7 days up to the end of the last complete UTC day, the share on each version, counting each id once on its **latest** version | Daily |
 | `dailyActive` | Distinct ids with a heartbeat in the last complete UTC day (the 24 hours up to its end) | Daily |
 | `weeklyActive` | Distinct ids with a heartbeat in the 7 days up to the end of the last complete UTC day. The same set `versionMix7d` divides, so it always equals `versionMix7d.denominator` | Daily |
-| `usageHours` | **Estimated, opted-in installs only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar`. `allTimeRounded` is `allTime` to the nearest whole hour, half up, for a badge (shields.io cannot round, and would print `3019.33`) | Daily; `todaySoFar`, `allTime` and `allTimeRounded` every 10 minutes |
-| `installsAllTime` | **Opted-in installs counted when first seen**, since launch: a lower bound, not total users. Each id adds one the first time it sends a heartbeat that finds no raw row for it. An install silent for more than 90 days, one whose data was deleted, and one that opted out and back in (a new id) each count again if they come back. `/delete` never lowers it | Every 10 minutes |
+| `usageHours` | **Estimated, installs with telemetry on only, 10-minute resolution.** Each distinct id in a closed 10-minute bucket counts as 10 minutes, so hours = sum of bucket counts × 10 / 60, to two decimals. `yesterday` is the last complete UTC day. `last7d` and `last30d` are the 7 and 30 UTC days ending with it, so none of the three includes today. `todaySoFar` is the current UTC day's closed buckets only (the bucket in progress is not counted yet; with the 10-minute cache it can run about 20 minutes behind). `allTime` is every complete UTC day since launch plus `todaySoFar`. `allTimeRounded` is `allTime` to the nearest whole hour, half up, for a badge (shields.io cannot round, and would print `3019.33`) | Daily; `todaySoFar`, `allTime` and `allTimeRounded` every 10 minutes |
+| `installsAllTime` | **Installs with telemetry on, counted when first seen**, since launch: a lower bound, not total users. Each id adds one the first time it sends a heartbeat that finds no raw row for it. An install silent for more than 90 days, one whose data was deleted, and one that turned telemetry off and back on (a new id) each count again if they come back. `/delete` never lowers it | Every 10 minutes |
 | `activeLast24h` | Distinct ids with a heartbeat in the 24 hours up to `activeAsOf`. **Rolling**: it includes today, unlike `dailyActive`, which ends at the last complete UTC day | Hourly |
 | `activeLast7d` | Distinct ids with a heartbeat in the 7 days up to `activeAsOf`. **Rolling**: it includes today, unlike `weeklyActive`, which ends at the last complete UTC day | Hourly |
 | `activeAsOf` | When `activeLast24h`, `activeLast7d` and today's part of `peakDailyActive` were last counted: less than an hour before `generatedAt`. The passes in between repeat that count | Hourly |
@@ -189,9 +191,17 @@ nothing.
 
 The `definitions` block carries those sentences, so a badge or page can print
 the definition it was given rather than write its own. Every id is an
-**install that opted in**, not a person. Opting out and back in mints a new id,
-so one install can count twice inside a window. That is the cost of making
-opt-out an identity reset.
+**install with telemetry on**, not a person. Turning it off and back on mints a
+new id, so one install can count twice inside a window. That is the cost of
+making turning it off an identity reset.
+
+> **The v2.0.6 cutover.** Telemetry is on by default from v2.0.6; earlier
+> figures counted opted-in installs only, so the rise after that release is a
+> change in what is counted, not growth. The widget and `/report` print that
+> marker under the counted-installs label, and the `uniqueUsers30d`,
+> `installsAllTime` and `history.json` `days` definitions carry it. No field was
+> added: `versionMix7d` already splits the counts by `appVersion`, which is where
+> the cutover can be read in the data.
 
 **Why the trailing numbers are daily.** A 30-day distinct count reads every raw
 row from 30 days. Running it on every 10-minute pass would spend the free
@@ -320,7 +330,7 @@ ever was an id.
 | `days[].dailyActive` | Distinct ids with a heartbeat in that UTC day |
 | `days[].weeklyActive` | Distinct ids in the 7 days up to that day's end (`versionMix7d.denominator`) |
 | `days[].uniqueUsers30d` | Distinct ids in the 30 days up to that day's end |
-| `days[].usageHours` | That day's usage hours: estimated, opted-in installs only, 10-minute resolution |
+| `days[].usageHours` | That day's usage hours: estimated, installs with telemetry on only, 10-minute resolution |
 | `days[].versionMix7d` | The `metrics.json` `versionMix7d` object as of that day's end |
 | `concurrent10m[]` | Distinct ids in each closed 10-minute UTC bucket of the last 7 days, oldest first. **A bucket with no entry held nobody: read it as 0** |
 | `concurrent10m[].bucket`, `.count` | The bucket's start (ISO-8601 UTC) and its distinct-id count |
@@ -343,9 +353,9 @@ inline-SVG charts into any container. `/report` is served with a
 Content-Security-Policy that lets it load only its own script, stylesheet and
 JSON.
 
-The widget always shows the label *"Opted-in installs only: a lower bound, not
-total users."* The usage tile and the usage chart always carry *"estimated,
-opted-in installs only, 10-minute resolution"*, whatever subset is selected.
+The widget always shows the label *"Installs with telemetry on only: a lower
+bound, not total users."* and, under it, the v2.0.6 cutover marker (`CUTOVER_LABEL`). The usage tile and the usage chart always carry *"estimated,
+installs with telemetry on only, 10-minute resolution"*, whatever subset is selected.
 Until the first complete UTC day, a zero figure reads **collecting data**
 instead of `0`. A chart without enough data to draw reads the same (the daily
 trend needs two days), and so does everything if the JSON cannot be fetched.
@@ -457,10 +467,10 @@ is written down here so the rule can be checked.
   heartbeating ids, and the definitions say so.
 - **Free tier only.** Cloudflare's published free limits (as of this writing:
   100,000 Worker requests a day; D1 100,000 rows written and 5 million rows
-  read a day) cap how many opted-in installs this can serve. Each heartbeat
+  read a day) cap how many installs with telemetry on this can serve. Each heartbeat
   writes about two rows once D1's index writes are counted, and each raw row is
   deleted again at 90 days. **Estimate, not a measurement:** somewhere between
-  several hundred and about 1,500 opted-in installs playing a few hours a day.
+  several hundred and about 1,500 installs with telemetry on playing a few hours a day.
   Moving to a paid plan costs money, and that is a decision for the project
   owner, not for this code. A heartbeat is two statements in one batch (the
   all-time count's first-seen check, a primary-key lookup reading at most one
@@ -480,7 +490,7 @@ is written down here so the rule can be checked.
   clock), each online install cost 1,008 rows for the 7-day scan, 144 for the
   24-hour one, 73 for today at noon (about 72 averaged over a day) and 1 for
   `concurrentNow`. Run every 10-minute pass, the three scans would read about
-  176,000 × N rows a day, for an average of N opted-in installs online. Run
+  176,000 × N rows a day, for an average of N installs with telemetry on online. Run
   hourly, they read about 29,000 × N. With everything else in a day's passes
   (the daily rollup about 5,500 × N, heartbeats about 900 × N, `concurrentNow`,
   bucket closing and the purge about 500 × N, and about 160,000 rows that do not depend on N:
@@ -520,7 +530,7 @@ fixtures with known answers:
   shape and its snapshot-only reads (never `heartbeat`), the widget and report
   routes, and CORS on the GET routes only.
 - `test/widget/widget.test.ts`: the served `widget.js`, run in Node against a
-  stub DOM. Covers every tile and chart, subset selection, the opt-in and usage
+  stub DOM. Covers every tile and chart, subset selection, the counted-installs, cutover and usage
   labels, the collecting-data states, escaping, mounting and auto-mounting,
   the rolling-active, peak and all-time-usage tiles with their fallbacks over
   an older snapshot, and the old tile names keeping their figures.

@@ -62,8 +62,12 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   var DEFAULT_TILES = ["concurrentNow", "peakConcurrent", "activeLast24h", "activeLast7d", "uniqueUsers30d", "usageHoursAllTime"];
   var CHARTS = ["actives", "concurrent", "usageHours", "versions", "os"];
   var DEFAULT_CHARTS = ["actives", "concurrent", "usageHours", "versions"];
-  var OPT_IN_LABEL = "Opted-in installs only: a lower bound, not total users.";
-  var USAGE_LABEL = "estimated, opted-in installs only, 10-minute resolution";
+  /** Kept under its old name: OPT_IN_LABEL is on the public API embedders read (DRA-1987). */
+  var OPT_IN_LABEL = "Installs with telemetry on only: a lower bound, not total users.";
+  /** Telemetry went on by default in v2.0.6; said wherever the label is, so the rise never reads as growth (DRA-1980). */
+  var CUTOVER_LABEL = "Cutover: telemetry is on by default from v2.0.6. Earlier figures counted opted-in installs only, so the rise after that release is a change in what is counted, not growth.";
+  var COUNTED_NOTE = "Installs with telemetry on only.";
+  var USAGE_LABEL = "estimated, installs with telemetry on only, 10-minute resolution";
   var USAGE_WINDOW = "7 days, yesterday and 30 days are complete UTC days, so today is not in them. Today so far and all time include today, up to about 20 minutes behind.";
   var USAGE_WINDOW_ALL = "All time and today so far include today, up to about 20 minutes behind. Full days are complete UTC days, so today is not in them.";
   var COLLECTING = "collecting data";
@@ -340,7 +344,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     var days = daysOf(h);
     var body = "";
     var legend = "";
-    var note = name === "usageHours" ? USAGE_LABEL : "Opted-in installs only.";
+    var note = name === "usageHours" ? USAGE_LABEL : COUNTED_NOTE;
     var ready = false;
 
     if (loading) {
@@ -359,7 +363,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
         body = plot("line", line(wk, maxA, "eqbt-s2") + line(d, maxA, "eqbt-s1"), maxA, tips, CHART_TITLES.actives, num) +
           xaxis(shortDay(days[0].day), shortDay(days[days.length - 1].day)) +
           table(["UTC day", "Daily active", "Weekly active"], rows);
-        note = "Opted-in installs only. One point per complete UTC day.";
+        note = COUNTED_NOTE + " One point per complete UTC day.";
         ready = true;
       }
     } else if (name === "concurrent") {
@@ -382,7 +386,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
         body = plot("line", '<polygon class="eqbt-area" points="0,' + H + " " + linePoints(vals, maxC) + " " + W + "," + H + '"/>' +
           line(vals, maxC, "eqbt-s1"), maxC, ctips, CHART_TITLES.concurrent, num) +
           xaxis(chicago(new Date(start).toISOString()), chicago(new Date(end).toISOString()));
-        note = "Opted-in installs only. Times in America/Chicago.";
+        note = COUNTED_NOTE + " Times in America/Chicago.";
         ready = true;
       }
     } else if (name === "usageHours") {
@@ -412,7 +416,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
         body = '<div class="eqbt-versions" role="list">';
         for (var s = 0; s < shown.length; s++) body += shareRow(shown[s].appVersion, shown[s].count, shown[s].share);
         body += "</div>";
-        note = "Opted-in installs only. Of " + num(mix.denominator) + " installs seen in the 7 days to the last complete UTC day, each on its latest version.";
+        note = COUNTED_NOTE + " Of " + num(mix.denominator) + " installs seen in the 7 days to the last complete UTC day, each on its latest version.";
         ready = true;
       }
     } else if (name === "os") {
@@ -425,11 +429,11 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
           body += shareRow(OS_LABELS.hasOwnProperty(fam.family) ? OS_LABELS[fam.family] : fam.family, fam.count, fam.share);
         }
         body += "</div>";
-        note = "Opted-in installs only. Of " + num(om.denominator) + " installs seen in the 7 days to the last complete UTC day, each on the OS it reported last" +
+        note = COUNTED_NOTE + " Of " + num(om.denominator) + " installs seen in the 7 days to the last complete UTC day, each on the OS it reported last" +
           (om.since ? ", counted from " + shortDay(om.since) + " on" : "") + ". " + OS_CAVEAT;
         ready = true;
       } else {
-        note = "Opted-in installs only. " + OS_CAVEAT;
+        note = COUNTED_NOTE + " " + OS_CAVEAT;
       }
     }
     if (!body) body = collectingBox(false);
@@ -440,14 +444,15 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
 
   /**
    * The whole widget as an HTML string. m and h are the parsed metrics.json and
-   * history.json, or null when missing. The opt-in label is always rendered,
-   * whatever is selected.
+   * history.json, or null when missing. The counted-installs label and the
+   * v2.0.6 cutover marker are always rendered, whatever is selected.
    */
   function render(m, h, options, loading) {
     options = options || {};
     var tiles = select(options.tiles, TILES, DEFAULT_TILES);
     var charts = select(options.charts, CHARTS, DEFAULT_CHARTS);
-    var html = '<div class="eqbt" data-eqbt-version="1"><p class="eqbt-optin">' + esc(OPT_IN_LABEL) + "</p>";
+    var html = '<div class="eqbt" data-eqbt-version="1"><p class="eqbt-optin">' + esc(OPT_IN_LABEL) + "</p>" +
+      '<p class="eqbt-cutover">' + esc(CUTOVER_LABEL) + "</p>";
     if (tiles.length) {
       html += '<div class="eqbt-tiles">';
       for (var i = 0; i < tiles.length; i++) html += tile(tiles[i], m, h, loading);
@@ -552,6 +557,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     DEFAULT_CHARTS: DEFAULT_CHARTS.slice(),
     OS_CAVEAT: OS_CAVEAT,
     OPT_IN_LABEL: OPT_IN_LABEL,
+    CUTOVER_LABEL: CUTOVER_LABEL,
     USAGE_LABEL: USAGE_LABEL,
     USAGE_WINDOW: USAGE_WINDOW,
     USAGE_WINDOW_ALL: USAGE_WINDOW_ALL,
@@ -603,7 +609,8 @@ export const WIDGET_CSS = String.raw`/* EQBuddy Evolved telemetry widget. Every 
 }
 .eqbt *, .eqbt *::before, .eqbt *::after { box-sizing: border-box; }
 .eqbt [hidden] { display: none !important; }
-.eqbt-optin { margin: 0 0 12px; font-size: 0.875em; font-weight: 600; color: var(--eqbt-muted, var(--eqbt-d-muted)); }
+.eqbt-optin { margin: 0 0 4px; font-size: 0.875em; font-weight: 600; color: var(--eqbt-muted, var(--eqbt-d-muted)); }
+.eqbt-cutover { margin: 0 0 12px; font-size: 0.875em; color: var(--eqbt-muted, var(--eqbt-d-muted)); }
 .eqbt-tiles {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
@@ -682,7 +689,7 @@ export const REPORT_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EQBuddy Evolved telemetry report</title>
-<meta name="description" content="Public, opt-in usage counts for EQBuddy Evolved.">
+<meta name="description" content="Public usage counts from EQBuddy Evolved's heartbeat.">
 <link rel="stylesheet" href="/widget.css">
 <style>
   body { margin: 0; background: #fcfcfb; color: #0b0b0b; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -695,7 +702,7 @@ export const REPORT_HTML = `<!doctype html>
 <body>
 <main>
 <h1>EQBuddy Evolved telemetry</h1>
-<p class="intro">Public counts from EQBuddy Evolved's opt-in heartbeat. Telemetry is off unless a player turns it on, so every figure is a lower bound.
+<p class="intro">Public counts from EQBuddy Evolved's heartbeat. From v2.0.6 telemetry is on by default and one switch turns it off; before v2.0.6 it was off unless a player turned it on. Installs with telemetry off are never counted, so every figure is a lower bound.
 Raw figures: <a href="/metrics.json">metrics.json</a> and <a href="/history.json">history.json</a>.
 <a href="https://github.com/DranakCorps-bot/eqbuddy-telemetry">What is collected and how it is counted</a>.</p>
 <div data-eqbuddy-telemetry data-tiles="${REPORT_TILE_NAMES.join(" ")}" data-charts="${REPORT_CHART_NAMES.join(" ")}"></div>

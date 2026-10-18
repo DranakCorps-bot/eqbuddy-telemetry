@@ -116,7 +116,7 @@ describe("usageHours math", () => {
     // 00:05 on Oct 3: no Oct 3 bucket has closed yet.
     expect(m.usageHours).toEqual({ yesterday: 0.5, last7d: 1.5, last30d: 1.5, allTime: 1.5, todaySoFar: 0, allTimeRounded: 2 });
     expect(m.definitions.usageHours).toBe(DEFINITIONS.usageHours);
-    expect(DEFINITIONS.usageHours).toMatch(/Estimated.*opted-in installs only.*10-minute resolution/);
+    expect(DEFINITIONS.usageHours).toMatch(/Estimated.*installs with telemetry on only.*10-minute resolution/);
   });
 
   it("mid-day: today's closed buckets are todaySoFar and in allTime, and in no complete-day window", async () => {
@@ -332,6 +332,23 @@ describe("the widget routes", () => {
     expect(res.headers.get("Content-Type")).toBe("text/css; charset=utf-8");
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(await res.text()).toBe(WIDGET_CSS);
+  });
+
+  it("/report and the published definitions say installs with telemetry on, and mark the v2.0.6 cutover (DRA-1987)", () => {
+    const cutover = /on by default from v2\.0\.6.*opted-in installs only.*a change in what is counted, not growth/;
+    // /report's intro states the new default and the old one; the widget it loads carries the marker itself.
+    expect(REPORT_HTML).toMatch(/From v2\.0\.6 telemetry is on by default/);
+    expect(REPORT_HTML).toMatch(/before v2\.0\.6 it was off unless a player turned it on/);
+    expect(REPORT_HTML).not.toMatch(/opt-in/i);
+    // The cutover rides on the two definitions that say who is counted, and on history.json's days.
+    expect(DEFINITIONS.uniqueUsers30d).toMatch(cutover);
+    expect(DEFINITIONS.installsAllTime).toMatch(cutover);
+    expect(HISTORY_DEFINITIONS.days).toMatch(cutover);
+    // Outside that sentence, no definition still says the figures are opted-in installs.
+    const strip = (t: string) => t.replace(/Telemetry is on by default from v2\.0\.6;[^.]*\./g, "");
+    for (const [k, v] of [...Object.entries(DEFINITIONS), ...Object.entries(HISTORY_DEFINITIONS)]) {
+      expect(strip(v), k).not.toMatch(/opted-in|opt-in|opts out|telemetry is off unless/i);
+    }
   });
 
   it("/report is a thin page over the widget, loading nothing from anywhere else", async () => {
