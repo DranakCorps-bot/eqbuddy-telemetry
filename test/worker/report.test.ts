@@ -340,6 +340,8 @@ describe("the widget routes", () => {
     expect(REPORT_HTML).toMatch(/From v2\.0\.6 telemetry is on by default/);
     expect(REPORT_HTML).toMatch(/before v2\.0\.6 it was off unless a player turned it on/);
     expect(REPORT_HTML).not.toMatch(/opt-in/i);
+    // DRA-2010: the intro names v2.0.7's switch-on beside v2.0.6's default.
+    expect(REPORT_HTML).toMatch(/from v2\.0\.7 it is on for every install, past "Not now" answers included/);
     // The cutover rides on the two definitions that say who is counted, and on history.json's days.
     expect(DEFINITIONS.uniqueUsers30d).toMatch(cutover);
     expect(DEFINITIONS.installsAllTime).toMatch(cutover);
