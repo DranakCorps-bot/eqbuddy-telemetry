@@ -13,6 +13,7 @@ interface Api {
   CHARTS: string[];
   OPT_IN_LABEL: string;
   CUTOVER_LABEL: string;
+  CUTOVER_207_LABEL: string;
   USAGE_LABEL: string;
   select(value: unknown, all: string[], defaults?: string[]): string[];
   render(m: unknown, h: unknown, options?: { tiles?: unknown; charts?: unknown }, loading?: boolean): string;
@@ -118,6 +119,11 @@ function tileState(html: string, name: string): string | undefined {
 const CUTOVER =
   "Cutover: telemetry is on by default from v2.0.6. Earlier figures counted opted-in installs only, so the rise after that release is a change in what is counted, not growth.";
 
+const CUTOVER_207 =
+  'Second cutover: telemetry is on for every install from v2.0.7, past "Not now" answers included, so every install is counted unless it was turned off. The rise after that release is also a change in what is counted, not growth.';
+/** As render() writes it: esc() turns the quotes into entities. */
+const CUTOVER_207_HTML = CUTOVER_207.replace(/"/g, "&quot;");
+
 describe("the widget module", () => {
   it("publishes its API on window with the documented tile and chart names", () => {
     const api = load();
@@ -134,6 +140,16 @@ describe("the widget module", () => {
     expect(api.OPT_IN_LABEL).toBe("Installs with telemetry on only: a lower bound, not total users.");
     // "opted-in" survives only inside the cutover sentence, which is about the figures before v2.0.6.
     expect(WIDGET_JS.split(CUTOVER).join("")).not.toMatch(/opted-in|opt-in/i);
+  });
+
+  it("marks the v2.0.7 cutover as a second marker, after the v2.0.6 one and not instead of it (DRA-2010)", () => {
+    const api = load();
+    expect(api.CUTOVER_207_LABEL).toBe(CUTOVER_207);
+    for (const html of [api.render(METRICS, HISTORY), api.render(METRICS, HISTORY, { tiles: "none", charts: "none" }), api.render(EMPTY_METRICS, EMPTY_HISTORY)]) {
+      expect(html).toContain(CUTOVER);
+      expect(html).toContain(CUTOVER_207_HTML);
+      expect(html.indexOf(CUTOVER)).toBeLessThan(html.indexOf(CUTOVER_207_HTML));
+    }
   });
 
   it("depends on nothing: no import, no remote URL fetched, no header or console use", () => {

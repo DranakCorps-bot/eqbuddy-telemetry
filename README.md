@@ -3,10 +3,12 @@
 The backend for **EQBuddy Evolved's telemetry heartbeat**. It is public so you can
 read exactly what it stores instead of taking our word for it.
 
-- **On by default from v2.0.6, off with one switch** (Options → Behavior →
-  Help improve EQBuddy). Before v2.0.6 EQBuddy sent nothing until you said yes,
-  and anyone who said "Not now" or turned it off on an earlier build stays off.
-  EQBuddy 1.x and the legacy builds never send anything.
+- **On for every install from v2.0.7, off with one switch** (Options →
+  Behavior → Help improve EQBuddy). v2.0.6 turned it on by default; v2.0.7 turns
+  it on for every install, including anyone who said "Not now" or turned it off
+  on an earlier version, and turning it off from v2.0.7 on is final. Before
+  v2.0.6 EQBuddy sent nothing until you said yes. EQBuddy 1.x and the legacy
+  builds never send anything.
 - **Three fields, and nothing else.** A random install id minted the
   first time telemetry is on, the app version, and your Windows version.
 - **Your IP address is never stored and never logged.** It reaches Cloudflare
@@ -24,8 +26,9 @@ That page wins any disagreement with this README.
 > **Status: deployed 2026-09-24** (Cloudflare free tier) at
 > `https://eqbuddy-telemetry.eqbuddy-telemetry.workers.dev`. Released
 > EQBuddy Evolved builds send to that host while telemetry is on: before
-> v2.0.6 only after a player opted in, and from v2.0.6 by default unless a
-> player turns it off. See [Deploying](#deploying).
+> v2.0.6 only after a player opted in, from v2.0.6 by default unless a
+> player turns it off, and from v2.0.7 on every install unless it is turned off
+> in Options. See [Deploying](#deploying).
 
 ## What it does
 
@@ -203,6 +206,13 @@ making turning it off an identity reset.
 > `installsAllTime` and `history.json` `days` definitions carry it. No field was
 > added: `versionMix7d` already splits the counts by `appVersion`, which is where
 > the cutover can be read in the data.
+>
+> **The v2.0.7 cutover** (DRA-2010). Telemetry is on for every install from
+> v2.0.7, past "Not now" answers included, so every install is counted unless it
+> was turned off; the rise after that release is also a change in what is
+> counted, not growth. The widget and `/report` print a second marker
+> (`CUTOVER_207_LABEL`) under the first, never instead of it, and `/report`'s
+> intro names it. The definitions are unchanged, and again no field was added.
 
 **Why the trailing numbers are daily.** A 30-day distinct count reads every raw
 row from 30 days. Running it on every 10-minute pass would spend the free
@@ -355,7 +365,7 @@ Content-Security-Policy that lets it load only its own script, stylesheet and
 JSON.
 
 The widget always shows the label *"Installs with telemetry on only: a lower
-bound, not total users."* and, under it, the v2.0.6 cutover marker (`CUTOVER_LABEL`). The usage tile and the usage chart always carry *"estimated,
+bound, not total users."* and, under it, the v2.0.6 cutover marker (`CUTOVER_LABEL`) and the v2.0.7 one (`CUTOVER_207_LABEL`). The usage tile and the usage chart always carry *"estimated,
 installs with telemetry on only, 10-minute resolution"*, whatever subset is selected.
 Until the first complete UTC day, a zero figure reads **collecting data**
 instead of `0`. A chart without enough data to draw reads the same (the daily

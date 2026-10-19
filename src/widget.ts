@@ -66,6 +66,8 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   var OPT_IN_LABEL = "Installs with telemetry on only: a lower bound, not total users.";
   /** Telemetry went on by default in v2.0.6; said wherever the label is, so the rise never reads as growth (DRA-1980). */
   var CUTOVER_LABEL = "Cutover: telemetry is on by default from v2.0.6. Earlier figures counted opted-in installs only, so the rise after that release is a change in what is counted, not growth.";
+  /** v2.0.7 turned telemetry on for every install, past "Not now" answers included; a SECOND marker beside the first, never instead of it (DRA-2010). */
+  var CUTOVER_207_LABEL = "Second cutover: telemetry is on for every install from v2.0.7, past \"Not now\" answers included, so every install is counted unless it was turned off. The rise after that release is also a change in what is counted, not growth.";
   var COUNTED_NOTE = "Installs with telemetry on only.";
   var USAGE_LABEL = "estimated, installs with telemetry on only, 10-minute resolution";
   var USAGE_WINDOW = "7 days, yesterday and 30 days are complete UTC days, so today is not in them. Today so far and all time include today, up to about 20 minutes behind.";
@@ -445,14 +447,15 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
   /**
    * The whole widget as an HTML string. m and h are the parsed metrics.json and
    * history.json, or null when missing. The counted-installs label and the
-   * v2.0.6 cutover marker are always rendered, whatever is selected.
+   * v2.0.6 and v2.0.7 cutover markers are always rendered, whatever is selected.
    */
   function render(m, h, options, loading) {
     options = options || {};
     var tiles = select(options.tiles, TILES, DEFAULT_TILES);
     var charts = select(options.charts, CHARTS, DEFAULT_CHARTS);
     var html = '<div class="eqbt" data-eqbt-version="1"><p class="eqbt-optin">' + esc(OPT_IN_LABEL) + "</p>" +
-      '<p class="eqbt-cutover">' + esc(CUTOVER_LABEL) + "</p>";
+      '<p class="eqbt-cutover">' + esc(CUTOVER_LABEL) + "</p>" +
+      '<p class="eqbt-cutover">' + esc(CUTOVER_207_LABEL) + "</p>";
     if (tiles.length) {
       html += '<div class="eqbt-tiles">';
       for (var i = 0; i < tiles.length; i++) html += tile(tiles[i], m, h, loading);
@@ -558,6 +561,7 @@ export const WIDGET_JS = String.raw`/* EQBuddy Evolved telemetry widget. Public,
     OS_CAVEAT: OS_CAVEAT,
     OPT_IN_LABEL: OPT_IN_LABEL,
     CUTOVER_LABEL: CUTOVER_LABEL,
+    CUTOVER_207_LABEL: CUTOVER_207_LABEL,
     USAGE_LABEL: USAGE_LABEL,
     USAGE_WINDOW: USAGE_WINDOW,
     USAGE_WINDOW_ALL: USAGE_WINDOW_ALL,
@@ -702,7 +706,7 @@ export const REPORT_HTML = `<!doctype html>
 <body>
 <main>
 <h1>EQBuddy Evolved telemetry</h1>
-<p class="intro">Public counts from EQBuddy Evolved's heartbeat. From v2.0.6 telemetry is on by default and one switch turns it off; before v2.0.6 it was off unless a player turned it on. Installs with telemetry off are never counted, so every figure is a lower bound.
+<p class="intro">Public counts from EQBuddy Evolved's heartbeat. From v2.0.6 telemetry is on by default and one switch turns it off, and from v2.0.7 it is on for every install, past "Not now" answers included; before v2.0.6 it was off unless a player turned it on. Installs with telemetry off are never counted, so every figure is a lower bound.
 Raw figures: <a href="/metrics.json">metrics.json</a> and <a href="/history.json">history.json</a>.
 <a href="https://github.com/DranakCorps-bot/eqbuddy-telemetry">What is collected and how it is counted</a>.</p>
 <div data-eqbuddy-telemetry data-tiles="${REPORT_TILE_NAMES.join(" ")}" data-charts="${REPORT_CHART_NAMES.join(" ")}"></div>
